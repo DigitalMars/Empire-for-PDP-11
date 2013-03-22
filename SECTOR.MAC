@@ -1,0 +1,409 @@
+
+; SECTOR.MAC    2-Nov-82
+; Routines to manipulate the map display on the screen.
+; Globals defined:      CENTER,SECTOR,PCUR2,POSCUR,MAPPRT,INSECT,CMDCUR
+;                       SETCUR,CLRSEC
+
+        .globl  CURSOR,CURx,CURy,BORDER
+        .globl  MAPTAB,DECIN,TTout,MAP,RNGNRM
+        .globl  IROWCO,ARROW,DIV10
+
+; Sector display area
+        Srowmn= 4
+        Srowmx= Trowmx-1        ;leave 4 rows on top and 1 on bottom
+        Scolmn= 0
+        Scolmx= Tcolmx-3        ;leave space for row #
+
+; Max base location
+; Base is the map location of the upper left corner of the sector
+        Browmx= Mrowmx-Srowmx+Srowmn
+        Bcolmx= Mcolmx-Scolmx+Scolmn
+
+;Data
+
+LSTBAS::                ;base location of last sector displayed
+bascol: .byte   -1      ;-1 means that no sector is currently displayed
+basrow: .byte   -1
+
+newbas:                 ;base location of new sector to be displayed
+newcol: .blkb   1
+newrow: .blkb   1
+
+locpnt:                 ;map location for new sector
+loccol: .blkb   1
+locrow: .blkb   1
+
+lslpnt:                 ;map location for last sector displayed
+lslcol: .blkb   1
+lslrow: .blkb   1
+
+cur:                    ;position where we want the cursor
+curcol: .blkb   1
+currow: .blkb   1
+
+;;;;;;;;;;;;;;;;;;;;
+; Clear current sector showing.
+
+CLRSEC::
+        .curs   Srowmn,Scolmn   ;start of sector
+        .TTfunc 1               ;erase to end of screen
+        mov     #-1,LSTBAS      ;indicate sector is blank
+        rts     PC
+
+;******************************
+; CENTER
+; Purpose:      Given a location in R0, center a sector about that loc,
+;               type the sector, and position the cursor at that loc.
+; Use:
+;       mov     #loc,R0
+;       call    CENTER
+;
+
+CENTER::
+        push    R1
+        push    R0              ;save loc
+        call    IROWCO          ;get col,row
+        sub     #<Srowmx-Srowmn>/2,R0   ;center row
+        sub     #<Scolmx-Scolmn>/2,R1   ;center col
+        swab    R0
+        clrb    R0              ;clear LSB
+        bic     #^O177400,R1    ;clear MSB
+        bis     R1,R0           ;R0 is new base
+        call    SECTOR          ;type new sector
+        pop     R0              ;get loc
+        pop     R1
+        jmp     Pcur24          ;position cursor there
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; SECTOR
+; Purpose: Type out a sector on the screen, using lstbas to minimize the #
+;          of chars sent to the terminal. Type out row and column coordinates.
+; Use:
+;       mov     base,R0         ;location of upper left corner of new sector
+;       call    SECTOR
+;
+; Registers: R0 contains actual base of sector typed.
+
+SECTOR::
+        .savacs
+; Adjust newbas until the whole sector will fit on the screen.
+        call    IROWCO          ;separate into row and column
+        jsr     R5,RNGNRM       ;normalize row
+        .byte   0,Browmx        ;to between 0 and Browmx
+        movb    R0,newrow       ;store new base row
+        movb    R1,R0           ;put col in R0
+        jsr     R5,RNGNRM       ;normalize column
+        .byte   0,Bcolmx
+        movb    R0,newcol       ;store new base column
+
+        mov     newbas,R0       ;get new base
+        if      lstbas eq R0, done      ;if same sector then we're done
+
+        mov     R0,AC0(SP)      ;R0 on return
+        mov     R0,locpnt       ;initialize location pointer
+doloc:  mov     locpnt,R0       ;get current location
+          .if   eq,debug
+        bpl     51$
+        .test   51
+        halt
+51$:
+          .endc
+        call    MAP             ;see what's there
+        mov     R1,R2           ;remember it in R2
+        mov     lstbas,R0       ;get last base
+        bmi     1$              ;if none, no comparison check
+        add     locpnt,R0
+        sub     newbas,R0       ;R0=locpnt+lstbas-newbas
+        mov     R0,lslpnt       ;old map location
+          .if   eq,debug
+        bpl     50$
+        .test   50
+        halt
+50$:
+          .endc
+        call    MAP             ;see what's already there
+        ifb     R1 eq R2, next  ;if already on screen, don't type anything
+1$:     tst     R2              ;see if it's a blank
+        bne     2$              ;no, print it
+        tst     lstbas          ;see if screen has been cleared
+        bmi     next            ;yes (a blank exists here already)
+2$:     call    pcur2           ;put cursor in right spot
+        movb    MAPTAB(R2),R0   ;get char to be typed
+        call    TTout           ;type it
+next:   incb    loccol          ;next column
+        movb    newcol,R0       ;get base column
+        add     #Scolmx-Scolmn,R0       ;get max map col
+        ifb     R0 his loccol, doloc    ;if max is not exceeded
+
+        ifb     basrow eq newrow, fixloc        ;if rows haven't changed
+        movb    locrow,R1       ;current row
+        call    DIV10           ;R0=R1/10, remainder in R1
+        bne     chklst          ;no row number to be typed
+
+;type row number
+        call    pcur2           ;position cursor
+        call    DECPRT          ;print digit in R0
+        .imes   <0>
+        br      fixloc          ;fix locpnt
+
+;if last sector had a number here, erase it
+chklst: tst     lstbas          ;last screen blank?
+        bmi     fixloc          ;yes
+        movb    lslrow,R1       ;last map row #
+        call    DIV10           ;R0=R1/10, remainder in R1
+        bne     fixloc          ;R1<>0
+        call    pcur2           ;position cursor
+        .imes   <  >
+
+;fix locpnt
+fixloc: movb    newcol,loccol   ;reset column
+        incb    locrow          ;next row
+        movb    newrow,R0
+        add     #Srowmx-Srowmn,R0       ;R0=max row
+        ifb     R0 lo locrow, colcrd    ;done if (max row) < locrow
+        jmp     doloc           ;do next row
+
+;finish up and return
+done:   mov     newbas,lstbas   ;new sector is now the last one
+        rts     PC
+
+;type out column coordinates, and jump to done when finished
+colcrd: ifb     bascol eq newcol, done  ;if col coords are already there
+        mov     #Trowmx*256+0,cur       ;bottom left corner of screen
+        call    poscur          ;move cursor there
+        ifb     CURY eq #TROWMX,4$
+        .cmes   4,0,<colcrd>
+        HALT
+4$:     movb    newcol,R2       ;init col
+        mov     R2,R3
+        add     #Scolmx-Scolmn,R3       ;R3 is max column
+2$:     ifb     R3 his R2,3$    ;if not done
+        .TTfunc 0               ;erase to end of line
+        br      done
+
+3$:     mov     R2,R1           ;lo 16 bits
+        call    DIV10           ;R0=R1/10, remainder in R1
+        bne     1$              ;no col # here
+        call    DECPRT
+        .imes   <0>
+        tst     (R2)+           ;add 2 to column
+        br      2$              ;loop
+
+1$:     .imes   < >
+        inc     R2              ;new column
+        br      2$              ;loop
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; PCUR2
+; Purpose: From locpnt and newbas, calculate cursor coords cur and move the
+;          cursor there.
+; Use:
+;       call    pcur2   ;assume that locpnt and newbas are set up
+; Or:
+;       mov     loc,R0
+;       call    pcur24  ;if location is in R0
+;
+PCUR24::
+        mov     R0,locpnt       ;set up locpnt
+PCUR2::
+        mov     locpnt,cur
+        add     #Srowmn*256+Scolmn,cur  ;screen offset
+        sub     newbas,cur              ;sector offset
+        br      poscur                  ;position cursor
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; POSCUR,SETCUR
+; Purpose: Move the cursor to the location specified by cur or R0. Use
+;          CURSOR to minimize characters sent to the terminal.
+; Use:
+;       mov     cursor,cur      ;store new row,col of where you want cursor
+;       call    poscur
+;
+; Cases: 4 Cases are considered:
+;       1. Use cursor addressing if we are to move backwards or up.
+;       2. Use a CRLF if we start a new line.
+;       3. Do nothing if cursor is at right spot.
+;       4. Else use cursor addressing.
+;
+
+SETCUR::
+        mov     R0,cur          ;external entry point
+poscur:
+        push    R0
+        push    R1
+        if      cur eq CURSOR, donep    ;if case 3
+        movb    currow,R0
+        movb    CURy,R1
+        sub     R1,R0           ;R0=currow-CURy
+        bmi     curadr          ;case 1
+        cmpb    #1,R0           ;see if 1 row down
+        bne     curadr          ;case 4
+        tstb    curcol          ;see if column 0
+        bne     curadr          ;case 4
+        call    CRLF            ;case 2
+        br      donep
+
+curadr: mov     cur,1$          ;get new cursor position
+        swab    1$              ;set up for TTcurs
+        jsr     R1,TTcurs       ;move the cursor
+1$:     .blkw   1               ;argument in form column,,row
+donep:
+          .if   eq,debug
+        if      cur eq CURSOR,1$
+        .cmes   4,0,<POSCUR>
+        HALT
+1$:
+          .endc
+        pop     R1
+        pop     R0
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; MAPPRT
+; Purpose: Take a location in R0. If it is in the currently displayed sector,
+;          type out the map value at that point, and move the cursor right.
+; Use:
+;       mov     loc,R0
+;       call    MAPPRT
+;
+; Registers: R0 preserved.
+
+MAPPRT::
+        call    CHKLOC
+        push    R1
+        push    R0              ;our location
+        jsr     R5,INSECT       ;in sector?
+        .word   0               ;no edge
+        bcs     1$              ;no
+
+        call    PCUR2-4         ;position cursor
+        call    MAP             ;see what's there
+        movb    MAPTAB(R1),R0   ;get char
+        call    TTout           ;type it
+
+1$:     pop     R0
+        pop     R1
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INSECT
+; Purpose: Determine if location in R0 is in the current sector, except
+;          for a border of n spaces. If the sector edge lies on a map edge,
+;          the n spaces do not apply for that edge. C=0 if in sector, C=1
+;          if outside sector or if LSTBAS=-1.
+; Use:
+;       mov     loc,R0
+;       jsr     R5,INSECT
+;       .word   n
+;
+; R0 preserved.
+
+INSECT::
+        tst     LSTBAS          ;see if a sector on screen
+        bpl     7$              ;yes
+        sec                     ;not in sector
+        br      8$              ;return
+7$:     push    R1
+        push    R0
+        call    IROWCO  ;put just row in R0
+;check rows
+;top row
+        movb    basrow,R1       ;get top allowable row
+        beq     1$              ;if coincides with top edge
+        add     (R5),R1         ;add in n
+1$:     movb    R1,min          ;min value in sector
+;bottom row
+        movb    basrow,R1
+        add     #Srowmx-Srowmn,R1       ;R1=bottom row
+        cmpb    #Mrowmx,R1      ;see if bottom edge of map
+        call    3$              ;save a word
+        bcs     4$              ;not in sector
+;check columns
+;left column
+        movb    (SP),R0         ;get column
+        movb    bascol,R1       ;leftmost col
+        beq     5$              ;coincides with left edge
+        add     (R5),R1         ;add n
+5$:     movb    R1,min          ;min col
+;right column
+        movb    bascol,R1
+        add     #Scolmx-Scolmn,R1
+        cmpb    #Mcolmx,R1      ;see if right edge of map
+        call    3$
+
+4$:     pop     R0
+        pop     R1
+8$:     bit     (R5)+,R5        ;add 2 to R5 w/o affecting C
+        rts     R5
+
+3$:     beq     6$              ;if bot or right edge of map
+        sub     (R5),R1         ;subtract n
+6$:     movb    R1,max          ;max value
+        jsr     R5,RNGNRM       ;check range
+min:    .blkb   1
+max:    .blkb   1               ;args for RNGNRM
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CMDCUR
+; Purpose:      Given a location and a command, find out if the command
+;               is a direction command. If it is, try to move the cursor
+;               in that direction. If that fails, change sectors so you can.
+;               If that fails, return with location and cursor unchanged.
+; Use:
+;       mov     loc,R0          ;current cursor location
+;       mov     cmd,R1          ;command (ascii)
+;       call    cmdcur
+;
+; Directions:   Directions recognized are
+;
+;               QWE
+;               A D
+;               ZXC
+;
+; Return:       if R1 <> (D,E,W,Q,A,Z,X,C)
+;               then [ C=0; R0 & R2 preserved ]
+;               else [ C=1; if (good command) then [R0=new location; R2=dir]
+;                                             else R0,R2 preserved]
+;
+
+CMDCUR::
+        push    R2
+        push    R0
+        mov     #7,R2                   ;directions are 0-7
+1$:     ifb     R1 eq dirtab(R2), gotit ;if command is in table
+        dec     R2                      ;try another direction
+        bpl     1$
+        clc                     ;R1 wasn't recognized
+        br      ret
+
+gotit:  call    ARROW           ;move R0 to new location
+        call    BORDER          ;see if on the border
+        bcs     ret2            ;can't move onto border
+        mov     R0,(SP)         ;replace top of stack with new loc
+        jsr     R5,INSECT       ;see if it's in the sector
+        .word   2               ;with a border 2 deep
+        bcc     good            ;if in the sector
+        mov     lstbas,R0       ;base loc of sector
+        call    ARROW           ;move base
+        call    SECTOR          ;shift sectors
+good:   mov     (SP),R0         ;get new loc
+        call    pcur2-4         ;put the cursor there
+        mov     R2,2(SP)        ;will be popped into R2
+ret2:   sec                     ;make sure it's set
+ret:    pop     R0              ;get move
+        pop     R2              ;restore R2
+        rts     PC
+
+dirtab: .ascii  /DEWQAZXC/      ;direction commands
+        .even
+
+        .end
+
+
+.

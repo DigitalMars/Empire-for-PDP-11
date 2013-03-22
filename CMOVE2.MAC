@@ -1,0 +1,216 @@
+
+; CMOVE2.MAC    1-Dec-82
+; Globals defined:      EXPSHP,EXPLOR,RANDIR,ENEATT,AROUND
+        .globl  TYPE,TYP,OWN,IFO,LOC,ILA,BELL,ROUND,FNDCIT
+        .globl  HITS,ARMYco,FIGHco,SHIPco,IDLE,DIR,DIR3,ARROW,BORDER,RANDOM
+        .globl  OKMOVE,LOCI,LOCMAX,TROOPT,INMASK,PATH
+        .globl  ARMYif,FIGHif,SHIPif,TROOif,CARRif,OPT,MOVDIR,LTR
+        .globl  FNDUNI,PLYNUM,FIPATH,PHASIN,MAP
+        .globl  ADRMES,MAPNUM,MAPN,TYPCIT,RESLOC,DIST,HITTAB
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Select a random direction and return it in R2, giving priority
+; to moving diagonally.
+
+RANDIR::
+        push    R0
+        mov     #8,R0
+        call    RANDOM
+        mov     R0,R2           ;R2=0..7
+        mov     #2,R0
+        call    RANDOM          ;R0= 0 or 1
+        bne     1$              ;if R0=0
+        bisb    #1,R2           ;go diagonally (67%)
+1$:     pop     R0
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Given a direction in R2, look around for territory to explore,
+; giving priority to moving diagonally.
+; Input:
+;       R2 =    direction
+;       R3 =    unit #
+;
+; Returns:      C=0: R2 preserved, no territory to explore
+;               C=1: R2 = direction to go
+;
+
+EXPLOR::
+        .savacs
+        bic     #^O177770,R2    ;in case R2=-1
+        movb    #8,R4           ;control count
+        movb    MAPN(R5),MAPNUM ;player map
+        bis     #1,R2           ;diagonal
+
+loope:  call    OKMOVE          ;is R2 legal move?
+        bcs     ende            ;no
+        mov     LOC(R5),R0      ;get loc of unit
+        call    ARROW
+        call    ARROW           ;move twice that dir
+        call    MAP             ;what's there?
+        tst     R1              ;is it blank?
+        bne     ende            ;no
+        mov     R2,AC2(SP)      ;set dir
+        sec                     ;success
+        br      rete
+
+ende:   tst     (R2)+           ;add 2 to R2
+        ifb     R4 ne #5, 1$    ;if not halfway thru
+        dec     R2              ;alternate dirs
+1$:     bic     #^O177770,R2    ;normalize dir
+        sob     R4,loope
+        clc                     ;failure
+
+rete:   rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Search for unexplored territory and return loc in R0.
+; Returns:
+;       C=0:    no unexplored territory found, R0 preserved
+;       C=1:    R0=loc of "       "
+;
+
+EXPSHP::
+        .savacs
+        mov     #10,R2          ;10 tries
+        movb    MAPN(R5),MAPNUM ;player map
+
+loops:  movb    #98,R0
+        call    RANDOM
+        inc     R0
+        mov     R0,R1           ;R1= 1..98 cols
+        movb    #58,R0
+        call    RANDOM
+        inc     R0              ;R0= 1..58 rows
+        swab    R0
+        bis     R1,R0           ;R0=loc
+        call    MAP             ;what's there?
+        tst     R1              ;blank?
+        bne     1$              ;no
+        mov     R0,AC0(SP)      ;loc
+        sec
+        br      2$
+
+1$:     sob     R2,loops        ;try again
+        clc                     ;failed
+
+2$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Remove targets from LOCI and TROOPT if LOC is on them.
+;
+
+ARRLOC::
+        .savacs
+        mov     LOC(R5),R0              ;speed up loops
+        ifb     TYPE(R5) hi #F, 1$      ;if a ship
+
+        mov     #LOCI+<2*LOCMAX>,R4
+        add     R5,R4           ;pointer to LOCI
+        mov     #LOCMAX,R2      ;# of entries
+
+2$:     if      -(R4) ne R0, 3$ ;if not at loc
+        clr     (R4)            ;remove from LOCI
+3$:     sob     R2,2$
+        tstb    TYPE(R5)        ;A?
+        beq     4$              ;yes
+
+1$:     mov     #TROOPT+<2*6*5>,R4
+        add     R5,R4           ;pointer to TROOPT
+        mov     #6*5,R2         ;# of entries
+
+5$:     if      -(R4) ne R0, 6$
+        clr     (R4)
+6$:     sob     R2,5$
+
+4$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Look around LOC to see if there is anything to attack. If so,
+; return direction in R2 and set C, else clear C and preserve
+; R2.
+; Use:
+;       jsr     R4,ENEATT
+;       .byte   mask,0
+;
+; where mask=^B11111111, the bits correspond to AFDTSRCB, or things to
+;       attack. As will not attack Fs over sea, and ships will not attack Fs
+;       over land.
+;
+; R0,R1 destroyed
+;
+
+ENEATT::
+        push    R2
+        mov     #8,R2           ;8 directions
+        mov     #LTR+8,R0
+        add     R5,R0           ;point to LTR
+1$:     movb    -(R0),R1        ;get LTR
+        ifb     OWN(R1) eq PLYNUM(R5), 6$       ;if we own it
+        movb    TYP(R1),R1      ;get unit type
+        bmi     6$              ;not a unit
+        bitb    bitmap(R1),(R4) ;AND mask and unit mask
+        beq     6$              ;no match
+        ifb     R1 ne #F, 2$    ;if not attacking an F
+        ifb     (R0) eq #7,  4$ ;if F is over land
+        ifb     (R0) eq #16, 4$ ;if f is over land
+;then must be over sea
+        tstb    TYPE(R5)        ;army?
+        beq     6$              ;yes
+        br      2$
+
+4$:     ifb     TYPE(R5) los #F, 2$     ;if not a ship
+
+6$:     sob     R2,1$
+        clc
+
+3$:     pop     R2
+        bitb    (R4)+,(R4)+     ;skip over arg, C not affected
+        rts     R4
+
+2$:     dec     R2              ;convert to direction
+        mov     R2,(SP)         ;new R2
+        sec
+        br      3$              ;C is set
+
+;mask of unit positions:
+bitmap: .byte   ^B10000000      ;A
+        .byte   ^B01000000      ;F
+        .byte   ^B00100000      ;D
+        .byte   ^B00010000      ;T
+        .byte   ^B00001000      ;S
+        .byte   ^B00000100      ;R
+        .byte   ^B00000010      ;C
+        .byte   ^B00000001      ;B
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Purpose: Given a move in R2, look around till one that satisfies OKMOVE
+;          is found, and return it in R2 with C=0. Else set R2=-1 and C=1.
+; Use:
+;       mov     trialmove,R2
+;       call    AROUND
+;
+
+AROUND::
+        bic     #^O177770,R2    ;if R2=-1, then normalize it
+        push    R4
+        movb    #8,R4           ;control count
+1$:     call    OKMOVE          ;is move ok?
+        bcc     2$              ;yes
+        tstb    PLYTYP(R5)      ;computer?
+        beq     4$              ;yes
+        inc     R2              ;DIR doesn't exist for human
+        br      3$
+
+4$:     add     DIR(R5),R2      ;next direction
+3$:     bic     #^O177770,R2    ;normalize
+        sob     R4,1$
+        mov     #-1,R2          ;stay put
+        sec
+2$:     pop     R4
+        rts     PC
+
+        .end
+
+
+.

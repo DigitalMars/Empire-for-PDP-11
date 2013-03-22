@@ -1,0 +1,119 @@
+
+; IOMOD.MAC     18-Nov-82
+; File I/O module
+
+; Globals defined:
+        .globl  READ,WRITE,OPEN,WCLOSE
+; Globals required:
+        .globl  DSPACE  ;start of space for handler & I/O buffers
+
+        .mcall  .csigen,.readw,.writw,.close
+BLKSIZ  =       256             ;size (words) of a block
+errwrd  =       ^O52            ;error word addr
+
+STRTBF: .blkw   1               ;I/O buffer start
+BUFPNT: .blkw   1               ;I/O buffer pointer
+BLKNUM: .blkw   1               ;relative block #
+WRDCNT: .blkw   1               ;read word count
+LIST:   .blkw   5               ;EMT argument block
+CHNNUM: .blkw   1               ;channel #
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Open files for input, output
+; Use:
+;       jsr     R1,OPEN
+;       .word   dext            ;pointer to 4 default extensions
+;       .word   cstrng          ;pointer to command string
+; Output C=1 if open failure
+
+OPEN:   push    R0
+        .csigen #DSPACE,(R1)+,(R1)+     ;call command string interpreter
+        bit     (SP)+,R0        ;pop junk w/o affecting C or R0
+        bcs     1$              ;error
+        mov     R0,STRTBF       ;STRTBF -> start of I/O buffer
+        mov     R0,BUFPNT       ;init buffer pointer
+        clr     WRDCNT          ;word counter
+        clr     BLKNUM          ;start at block 0, clear C
+1$:     pop     R0
+        rts     R1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Read from the specified channel
+; Use:
+;       jsr     R1,READ
+;       .word   chnnum          ;input channel #
+; Output:
+;       R0 =    output word
+;       C = 1   input error
+;       Z = 1   with C=1 means EOF
+
+READ:   mov     (R1)+,CHNNUM    ;channel #
+        tst     WRDCNT          ;need to read in a block?
+        bne     1$              ;no
+        mov     STRTBF,BUFPNT   ;input buffer pointer
+        .readw  #list,CHNNUM,BUFPNT,#BLKSIZ,BLKNUM      ;read block
+        mov     R0,WRDCNT       ;# of blocks read
+        bcc     2$              ;no errors
+        tstb    @#errwrd        ;set Z if EOF
+        sec                     ;error
+        rts     R1
+
+2$:     inc     BLKNUM          ;next block
+1$:     dec     WRDCNT          ;1 less word
+        mov     bufpnt,R0       ;buffer pointer
+        mov     (R0),R0         ;get word
+        add     #2,bufpnt       ;next word
+        clc                     ;no errors
+        rts     R1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Write to output file
+; Use:
+;       R0 =    output word
+;       jsr     R1,WRITE
+;       .word   chnnum
+; Output:
+;       C =1    output error
+
+WRITE:  push    R2
+        push    R0
+        mov     (R1)+,CHNNUM    ;get channel #
+        mov     BUFPNT,R2       ;get pointer to output buffer
+        mov     R0,(R2)+        ;send word to buffer
+        mov     R2,BUFPNT       ;update pointer
+        sub     STRTBF,R2       ;buffer start
+        if      R2 lo #BLKSIZ*2,1$      ;if buffer isn't full
+        mov     STRTBF,BUFPNT           ;reset to start
+        .writw  #list,CHNNUM,BUFPNT,#BLKSIZ,BLKNUM      ;write block
+        bcs     2$              ;error
+        inc     BLKNUM          ;next block
+1$:     clc                     ;no error
+2$:     pop     R0
+        pop     R2
+        rts     R1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Fill out buffer with 0s and write block
+; Use:
+;       jsr     R1,WCLOSE
+;       .word   CHNNUM
+; Set C if error
+
+WCLOSE: push    R0
+        mov     (R1)+,1$                ;transfer channel number
+3$:     if      BUFPNT eq STRTBF, 2$    ;if done
+        clr     R0              ;pad buffer with 0
+        jsr     R1,WRITE
+1$:     .blkw   1
+        bcs     4$              ;error
+        br      3$
+
+2$:     .close  1$              ;close channel
+        clc                     ;no error
+4$:     pop     R0
+        rts     R1
+
+        .end
+
+
+.

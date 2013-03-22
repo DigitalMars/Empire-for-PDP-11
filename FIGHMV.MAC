@@ -1,0 +1,207 @@
+
+; FIGHmv.MAC    12-May-83
+; Globals defined:      FIGHif,FIGHco
+        .globl  HITS,HITTAB,TROOPT,RANDOM,RANDIR,ILA,IFO,LOCI,LOC,DIST
+        .globl  CITMAX,CITOWN,CITLOC,PLYNUM,UNIMAX,UNILOC,UNIT2,CHKOWN
+        .globl  ENEATT,EXPLOR,OKMOVE,AROUND,GAS,LOCMAX
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Select an IFO and ILA for a fighter.
+; R0,R1,R2,R4 destroyed
+
+;local variables:
+        fuel:   .blkb   1       ;range of operation
+                .even
+        ID:     .blkw   1
+
+FIGHif::
+        clr     ID              ;initialize
+        movb    GAS(R5),fuel    ;set fuel
+        cmpb    HITTAB+F,GAS(R5)        ;is F airborne? (gas<max)
+        bne     L253            ;yes
+        asrb    fuel            ;only let him go halfway out
+
+;Look for enemy troop transports, then submarines
+L706:
+        mov     #TROOPT+<10*2>,R4       ;T entries
+        movb    #5,R2           ;# of entries
+        call    FNDTAR          ;see if target
+        bcs     ret             ;yes
+        mov     #TROOPT+<15*2>,R4       ;S entries
+        movb    #5,R2
+        call    FNDTAR          ;see if target
+        bcs     ret             ;got one
+        cmp     #1000,ID        ;if ID=1000 goto L707
+        beq     L707
+;goto L707,L253,L701 with 33% chance of going each way
+        mov     #3,R0
+        call    RANDOM          ;# between 0-2
+        beq     L707            ;33%
+        dec     R0              ;33%
+        beq     L253
+;       br      L701
+
+;Move in a random direction
+L701:
+        call    RANDIR          ;pick random direction
+        mov     R2,ILA(R5)      ;set ILA
+        movb    #3,IFO(R5)      ;set IFO
+ret:    rts     PC
+
+;Move toward an enemy concentration within range
+L707:   mov     #LOCMAX,R2      ;# of entries
+        mov     #LOCI+<LOCMAX*2>,R4     ;LOCI array
+        call    FNDTAR          ;find target
+        bcs     ret             ;got one
+        if      ID eq #1000, L701
+
+;Move towards a city or carrier
+L253:   call    GOCIT
+        bcs     ret
+        call    GOCAR           ;go to a C?
+        bcs     ret             ;yes
+        mov     #1000,ID        ;set flag
+        br      L706            ;start over
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given address of 1 past top of array in R4 (FNDTAR will index
+; by R5) and # of entries in R2, set IFO, ILA and set C if there
+; is a target within range.
+; R0,R1,R2,R4 destroyed
+
+FNDTAR:
+        add     R5,R4           ;player offset
+        mov     LOC(R5),R1      ;unit loc
+1$:     mov     -(R4),R0        ;get target loc
+        beq     704$            ;no loc
+        call    DIST            ;find distance to target
+        cmpb    fuel,R0         ;is dist>fuel?
+        bcs     704$            ;yes
+        movb    #5,IFO(R5)      ;set IFO
+        cmpb    fuel,GAS(R5)    ;kamikaze?
+        bne     2$              ;no
+        decb    IFO(R5)         ;IFO=4
+2$:     mov     (R4),ILA(R5)    ;set ILA
+        sec
+        rts     PC
+
+704$:   sob     R2,1$
+        clc
+        rts     PC
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; GOCIT
+; Purpose: Look for a city in range of F, set C, IFO & ILA if found.
+; Use:
+;       call    GOCIT
+;
+; R0,R1,R2,R4 destroyed
+;
+
+GOCIT:  mov     #CITMAX,R0
+        call    RANDOM
+        mov     R0,R2           ;R2= 0 to CITMAX-1
+        mov     R0,R4           ;R4=end of loop
+        mov     LOC(R5),R1      ;loc of F
+
+1$:     cmpb    CITOWN(R2),PLYNUM(R5)   ;do we own city?
+        bne     2$              ;no
+        mov     R2,R0
+        asl     R0              ;word
+        mov     CITLOC(R0),R0   ;get loc of city
+        beq     2$              ;no city
+        cmp     R0,R1           ;already at city?
+        beq     2$              ;yes
+        mov     R0,ILA(R5)      ;store in ILA
+        call    DIST            ;get dist from F to city
+        cmpb    GAS(R5),R0      ;dist>range?
+        bcs     2$              ;yes
+        movb    #7,IFO(R5)      ;set IFO
+        sec
+        rts     PC
+
+2$:     dec     R2              ;next city
+        bpl     3$              ;>=0
+        mov     #CITMAX-1,R2    ;wrap around
+3$:     cmpb    R2,R4           ;done?
+        bne     1$              ;no
+        clc
+        rts     PC
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Same as GOCIT, but find a carrier.
+; R0,R1,R2,R4 destroyed
+;
+
+GOCAR:  push    R3
+        mov     #UNIMAX,R0
+        call    RANDOM
+        mov     R0,R3           ;R3= 0 to UNIMAX-1
+        mov     R0,R4           ;R4= end of loop
+        mov     LOC(R5),R1      ;loc of F
+
+1$:     movb    UNIT2(R3),R2
+        bic     #^O177770,R2    ;get unit type
+        cmpb    #C,R2           ;is it a C?
+        bne     2$              ;no
+        call    CHKOWN          ;do we own it?
+        bcs     2$              ;no
+        cmpb    GAS(R5),fuel    ;looking for a place to land?
+        beq     3$              ;yes
+        movb    UNIT2(R3),R2
+        bic     #^O177407,R2    ;clear all but ifo
+        cmpb    #^O110,R2       ;ifo=9?
+        bne     2$              ;no
+3$:     mov     R3,R0
+        asl     R0
+        mov     UNILOC(R0),R0   ;get loc of carrier
+        beq     2$              ;doesn't exist
+        cmp     R0,R1           ;already there?
+        beq     2$              ;yes
+        call    DIST            ;find dist to C
+        cmpb    GAS(R5),R0      ;is dist>range?
+        bcs     2$              ;yes
+        movb    #6,IFO(R5)      ;set ifo
+        mov     R3,ILA(R5)      ;set ila
+        sec
+5$:     pop     R3
+        rts     PC
+
+2$:     dec     R3              ;next unit
+        bpl     4$              ;>=0
+        mov     #UNIMAX-1,R3    ;wrap around
+4$:     cmp     R3,R4           ;done?
+        bne     1$              ;no
+        br      5$              ;C=0
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given local variables and a move in R2, correct the move.
+; Input:
+;       R2 =            move direction
+;       R5 =            player offset
+; Output:
+;       R2 =            corrected move
+;       R0,R1,R4        destroyed
+;
+
+FIGHco::
+        jsr     R4,ENEATT       ;enemies to attack?
+        .byte   ^B11111000,0    ;AFDTS
+        bcs     retc            ;yes
+
+        cmpb    #2,IFO(R5)      ;kamikaze?
+        beq     1$              ;yes
+        cmpb    #10,GAS(R5)     ;is gas>10?
+        bcc     2$              ;no
+1$:     call    EXPLOR          ;territory to explore?
+        bcs     retc            ;yes
+
+2$:     tst     R2              ;stay put?
+        bmi     retc            ;yes
+        jmp     AROUND
+
+retc:   rts     PC
+
+        .end
+
+

@@ -1,0 +1,191 @@
+
+; VAR.MAC       12-Feb-83
+; Global system variables. This module must be linked first (i.e. at
+; location ^O1000) so that the stack will be contiguous with the other
+; variables.
+; Global subroutines defined:
+        .globl  INIT
+; Globals defined:
+        .globl  FIPATH,SAVBEG,SAVEND,LOCMAX
+        .globl  MAPS,EMPVER,SAVSP,OPT,MAPNUM,SEEDHI,SEEDLO,OVRPOP,WIN
+        .globl  CURSOR,CURx,CURy,TTtab,TTtbln,MAPTAB,MAPMAX,TAMPER
+        .globl  CITMAX,CITTOP,CITLOC,CITFND,CITPHS,CITOWN
+        .globl  UNIMAX,UNITOP,UNILOC,UNIILA,UNIT1,UNIT2
+        .globl  PLYR,STACK,ROUND,PLYNUM,MAPN,PLYTYP,WATCH
+        .globl  LOC,ILA,AB,AC,GAS,HITS,IFO,LTR,TYPE
+        .globl  TARGET,TROOPT,LOCI
+        .globl  NUMUNI,NUMOWN,NUMTAR,NUMPHS,DIR,DIR3,ABD
+
+        .globl  PLYRMV,CLEAR
+
+SAVBEG= .-100           ;space for stack for plyr2
+        .blkw   99      ;space for stack for plyr1
+splyr1: .blkw   5       ;so R0 to R4 can be popped
+        .word   PLYRMV  ;start addr for move
+
+; Here are the variables not associated with any player:
+
+MAPS:   .blkw   2*2000+3000     ;2K for first 2 maps, 3K for third
+EMPVER: .word   VERSIO  ;game version #
+SAVSP:  .blkw   1       ;stack save for SAVGAM
+OPT:    .blkb   1       ;0 means don't optimize PATH
+MAPNUM: .blkb   1       ;which of 3 maps we're on (0,1,2)
+SEEDHI: .blkw   1
+SEEDLO: .blkw   1       ;seeds for RANDOM (do not init with linker)
+OVRPOP: .byte   0       ;<>0 means that the unit arrays are full
+WIN:    .byte   0       ;<>0 means that the computer has conceded defeat
+
+CURSOR:                 ;cursor position
+CURx:   .blkb   1       ;row
+CURy:   .blkb   1       ;col
+
+; Terminal configuration variables
+TTtbln  =       25                      ;max size of TTtab
+TTtab:  .byte   1,ESC,'K,0,ESC,'J,0
+        .byte   ESC,'H,ESC,'J,0,ESC,'Y,0,32,0,32,0      ;for VT-52
+        .blkb   TTtbln-<.-TTtab>        ;reserve space for other ttys
+
+MAPTAB:                         ;map values
+        .byte   SPC             ;unknown
+        .byte   '*,'.,'+        ;unconquered city, sea, land
+        .byte   'O,'X           ;plyr 2 city, plyr 1 city
+        .byte   'A              ;army
+        .byte   'F,'F           ;fighter over land, over sea
+        .ascii  'DTSRCB'        ;ships
+        .ascii  'affdtsrcb'     ;plyr 1 units
+MAPMAX= .-MAPTAB                ;# of entries in table
+
+TAMPER: .byte   0               ;<>0 means prog has been tampered with
+        .even
+
+; Variables for the cities:
+CITMAX  =70             ;max number of cities
+CITTOP: .blkw   1       ;actual # of cities
+CITLOC: .blkw   CITMAX  ;city locations
+CITFND: .blkw   CITMAX  ;completion round #
+CITPHS: .blkb   CITMAX  ;city production phase
+CITOWN: .blkb   CITMAX  ;contains player # of owner, or 0
+
+; Variables for the units:
+UNIMAX  =500            ;max # of units
+UNITOP: .blkw   1       ;UNITOP >= topmost unit #
+UNILOC: .blkw   UNIMAX  ;unit locations (unit doesn't exist if UNILOC=0)
+UNIILA: .blkw   UNIMAX  ;space for player-defined variables
+UNIT1:  .blkb   UNIMAX  ;bit 7: Set if unit has been moved this round.
+                        ;bit 6: Set if plyr 2, clear if plyr 1.
+                        ;bits 0-5: Used for number of hits if unit is a ship.
+                        ;    If unit is a fighter, it is the fuel remaining.
+                        ;    If army, the player may use it.
+UNIT2:  .blkb   UNIMAX  ;bits 0-2: The unit type (0-7).
+                        ;bits 3-7: Player defined.
+
+; Variables for individual players
+PLYR:
+
+; Here are the variables for the first player (R5=0):
+PLYR1:
+        .word   PLYR2-PLYR1     ;R5 for other player
+STACK:  .word   splyr1  ;place to save plyr1's SP
+ROUND:  .word   1       ;which round we're on
+PLYNUM: .byte   1       ;we're player #1
+MAPN:   .byte   2       ;we're on map #2
+PLYTYP: .byte   0       ;signify we're a computer player
+WATCH:  .byte   0       ;signify we're not watching this player
+        .even
+
+;Here are variables used locally in the MOVE routines, mostly for convenience.
+
+LOC:    .blkw   1       ;current location
+ILA:    .blkw   1       ;UNIILA for that unit
+AB:     .blkb   1       ;ref map at LOC
+AC:     .blkb   1       ;ref map at new LOC
+;CONT:                  ;continent # of army (comp strat)
+GAS:                    ;gas left (F)
+HITS:   .blkb   1       ;hits left of unit
+IFO:    .blkb   1       ;bits 3-7 of UNIT2, right-justified
+LTR:    .blkb   8       ;8 locations of ref map around LOC, indexed by dir
+TYPE:   .blkb   1       ;unit type
+        .even
+
+;Here are variables specifically for the computer strategy.
+
+TARGET: .blkb   citmax  ;There is a TARGET byte for each possible city. If
+                        ;the computer doesn't know about the city or owns it,
+                        ;TARGET is set to 0, else TARGET<>0.
+
+;CITCON: .blkb  citmax  ;The continent # n of each city. n=0 means don't know
+                        ;what continent we're on, n<0 means we're not sure.
+
+TROOPT: .blkw   6*5     ;6 rows by 5 columns. The six rows correspond to ships
+                        ;D,T,S,R,C,B in that order. The columns correspond to
+                        ;locations of enemy ships discovered, in order from
+                        ;newest to oldest sighting.
+
+LOCMAX= 10
+LOCI:   .blkw   LOCMAX  ;locations of enemy armies sighted, from most to least
+                        ;recent.
+
+NUMUNI: .blkw   8       ; # of units of each type.
+NUMOWN: .blkb   1       ; # of our owned cities.
+NUMTAR: .blkb   1       ; # of cities listed as TARGETs.
+NUMPHS: .blkb   8       ; # of cities producing each type of unit.
+DIR:    .blkw   1       ; direction of rotation
+DIR3:   .blkw   1       ; = DIR*3
+ABD:    .blkb   1       ; # of As aboard a T
+        .even
+
+; Variables for second player (R5=PLYR2-PLYR1)
+PLYR2:
+        .word   0       ;R5 for plyr1
+        .blkw   1       ;STACK
+        .word   1       ;ROUND
+        .byte   2       ;PLYNUM
+        .byte   1       ;MAPN
+        .byte   1       ;PLYTYP (human player)
+        .byte   1       ;WATCH (watch this guy)
+        .even
+        .blkw   1       ;LOC
+        .blkw   1       ;ILA
+        .blkb   1       ;AB
+        .blkb   1       ;AC
+        .blkb   1       ;HITS
+        .blkb   1       ;IFO
+        .blkb   8       ;LTR
+        .blkb   1       ;TYPE
+        .even
+
+clr1:                   ;beg of area to be cleared
+
+FIPATH  =.-PLYR2+PLYR1
+         .blkw  citmax  ;fighter default codes
+
+;Since both players could be computers, we need to make sure that the space
+;for PLYR2 is >= the space required for a computer (PLYR1).
+.if     gt,<PLYR2-PLYR1>-<.-PLYR2>
+        .blkb   <PLYR2-PLYR1>-<.-PLYR2> ;make sure there's enuf space
+.endc
+
+clr2:                           ;end of area to be cleared
+        .WORD   SAVEND-SAVBEG   ;so we can check the EMPIRE.DAT file
+SAVEND:                         ;end of area to be saved
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; INIT
+; Purpose: Init variables to 0.
+; Use:
+;       jsr     PC,INIT
+;
+
+INIT:   jsr     R5,CLEAR
+        .word   UNITOP
+        .word   PLYR            ;clear unit variables
+        jsr     R5,CLEAR
+        .word   TARGET,PLYR2    ;player 1 variables
+        jsr     R5,CLEAR
+        .word   clr1,clr2       ;plyr 2 variables
+        rts     PC
+
+        .end
+
+
+.

@@ -1,0 +1,403 @@
+
+; MOVE2.MAC     30-Aug-82
+; Globals defined:      UPDMAP,FIGHT,FNDUNI,KILL,KILLml,SETLOC,RESLOC,YOUR
+
+        .globl  INLMES,UNIMES,CURMES,TTcurs,UNIT1,UNIT2,UNILOC,UNIILA
+        .globl  SNSFLG,MAPNUM,INMASK,LANDHI,LANDLO,TYPE,HITS,LOCPRT,RANDOM
+        .globl  CHKOWN,DECPRT,UNIMAX,TYP,PLYNUM,MAP,WATCH,LOC,ILA,IFO,LTR
+        .globl  ARROW,CHAMAP,NMES,TCAF,AB,LOCDOT,DELAY,SAVACS,SPACE,UNITOP
+        .mcall  .regdef
+        .regdef
+        .radix  10
+        .enabl  lc
+        eol=    ^O201           ;erase to end of line
+        eold=   ^O202
+
+.macro  push    arg
+        mov     arg,-(SP)
+.endm
+.macro  pop     arg
+        mov     (SP)+,arg
+.endm
+.macro  call    subr
+        jsr     PC,subr
+.endm
+.macro  .curs   row,col
+        jsr     R1,TTcurs
+        .byte   row,col
+.endm
+
+        A=0
+        F=1
+        D=2
+        T=3
+        S=4
+        R=5
+        C=6
+        B=7
+
+;;;;;;;;;;;;;;;;;;;;;
+; UPDMAP
+; Purpose: Change map to land or sea, depending on whether what's on it
+;          is over land or sea (i.e. an 'A' would be changed to '+').
+; Use:
+;       mov     loc,R0          ;map loc in question
+;       mov     ab,R1           ;ref map value
+;       call    UPDMAP
+;
+; Registers: R1 returns with what we changed the map to.
+
+UPDMAP::
+        clrb    MAPNUM          ;ref map
+        jsr     R5,INMASK       ;was it land?
+        .word   LANDHI,LANDLO
+        mov     #3,R1           ;'+'
+        bcs     3$              ;yes
+        dec     R1              ;sea val (R1=2) (can't be a city)
+3$:     jmp     CHAMAP          ;change ref map
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; FIGHT
+; Purpose: Perform a battle between attacker and defender.
+; Inputs: R0: loc of battle
+;         R1: map val of defender
+;         R3: unit number of attacker
+;         also local variables of attacker
+; Use:
+;       call    FIGHT
+; Outputs:
+;       C=0     if attacker wins
+;       C=1     if attacker loses
+;       Attacker local variables are updated.
+;       Defender unit variables are updated.
+;       SNSFLG is decremented if the defender is an enemy unit and is
+;               destroyed.
+;
+        Hatt:   .blkw   1       ;hits of attacker
+        Satt:   .blkw   1       ;strike of attacker
+        Hdef:   .blkw   1
+        Sdef:   .blkw   1       ;defender
+FIGHT:: 
+        jsr     R0,SAVACS
+
+;first set up Hatt,Hdef,Satt,Sdef
+        mov     #1,R2           ;default to 1
+        mov     #Sdef+2,R4      ;addr pointer
+        mov     R2,-(R4)
+        mov     R2,-(R4)
+        mov     R2,-(R4)
+        mov     R2,-(R4)        ;Hatt to Sdef = 1
+        cmpb    #F,TYPE(R5)     ;'A' or 'F'?
+        bcc     1$              ;yes
+        movb    HITS(R5),R2
+        mov     R2,(R4)+        ;Hatt=HITS(R5)
+        cmpb    #S,TYPE(R5)     ;'S'?
+        bne     1$              ;no
+        mov     #3,(R4)         ;Satt=3 (torpedos strike with 3)
+1$:     call    FNDUNI          ;find defender
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get type
+        cmpb    #F,R1           ;A or F?
+        bcc     3$              ;yes
+        movb    UNIT1(R3),R2
+        bic     #^O177740,R2    ;get hits
+        mov     R2,Hdef         ;set # of hits
+        cmpb    #S,R1           ;S?
+        bne     3$              ;no
+        mov     #3,Sdef         ;torpedos
+3$:
+;type message if defender is player 2
+        bitb    #^B01000000,UNIT1(R3)   ;is defender player 2?
+        beq     4$              ;no
+        .curs   2,20
+        call    YOUR
+        call    UNIMES
+        jsr     R1,INLMES
+        .asciz  / is under attack at /
+        .even
+        call    LOCDOT
+        jsr     R5,DELAY
+        .word   2
+
+4$:     .curs   2,20            ;set cursor for next message
+loopf:  mov     #2,R0
+        call    RANDOM          ;throw dice
+        bne     hitdef          ;hit the defender (50-50)
+        sub     Sdef,Hatt       ;hit attacker
+        bgt     loopf           ;go again
+
+;Attacker has been destroyed
+        cmpb    #F,R1           ;A or F?
+        bcc     5$              ;yes
+        bicb    #^O77,UNIT1(R3)
+        bisb    Hdef,UNIT1(R3)  ;set hits of defender
+5$:     call    YOUENE
+        push    R1              ;save def type
+        movb    TYPE(R5),R1     ;get type of attacker
+        call    UNIMES
+        pop     R1
+        call    DESTRO
+        .curs   3,20
+        call    YOUE2
+        mov     Hdef,R0         ;get hits left of defender
+        call    figmes
+        sec                     ;indicate defeat
+        rts     PC
+
+hitdef: sub     Satt,Hdef       ;hit defender
+        bgt     loopf           ;go again
+
+;Defender has been destroyed
+        call    CHKOWN          ;is defender an enemy unit?
+        bcc     1$              ;no
+        decb    SNSFLG          ;indicate to caller
+1$:     cmpb    #F,TYPE(R5)     ;is attacker an A or F?
+        bcc     2$              ;yes
+        movb    Hatt,HITS(R5)   ;set hits of attacker
+2$:     call    YOUE2
+        call    UNIMES
+        call    DESTRO
+        call    KILL            ;kill defender
+        .curs   3,20
+        call    YOUENE
+        movb    TYPE(R5),R1     ;get attacker type
+        mov     Hatt,R0         ;get hits left
+        call    figmes
+        clc                     ;victory
+        rts     PC
+
+figmes: call    UNIMES
+        jsr     R1,INLMES
+        .asciz  / has /
+        .even
+        call    DECPRT
+        jsr     R1,INLMES
+        .ascii  / hits left./
+        .byte   eold
+        .even
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; FNDUNI
+; Purpose: Find a unit whose location is given in R0 and whose map value
+;          is in R1. Return unit number in R3. Fatal error if unit doesn't
+;          exist.
+; Use:
+;       mov     #loc,R0
+;       clrb    MAPNUM          ;only use ref map values
+;       call    MAP             ;get map val in R1
+;       call    FNDUNI
+;
+; Registers: R0,R1 preserved, R3 returns unit number.
+;
+
+FNDUNI::
+        push    R2
+        push    R4
+        mov     UNITOP,R3       ;max unit # + 1
+        mov     R3,R2
+        asl     R2
+        add     #UNILOC,R2      ;unit loc index
+1$:     cmp     -(R2),R0        ;see if locs match
+        bne     2$              ;no
+        movb    UNIT2-1(R3),R4
+        bic     #^O177770,R4    ;get unit type in R4
+        cmpb    R4,TYP(R1)      ;same type as R1?
+        beq     3$              ;yes, we've got a match
+2$:     sob     R3,1$           ;next unit
+        jsr     R1,CURMES       ;fatal error
+        .byte   3,0
+        .asciz  /FNDUNI/
+        .even
+        halt
+
+3$:     dec     R3              ;convert to proper unit #
+        pop     R4
+        pop     R2
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; YOUENE, YOUE2, YOUR, ENEMY
+; Purpose: YOUENE types out message based on PLYNUM(R5).
+;          YOUE2 types out message based on UNIT1(R3).
+; Use:
+;       call    YOUENE
+;
+
+YOUENE:
+        cmpb    #2,PLYNUM(R5)   ;is it player 2?
+        bne     ENEMY           ;no
+
+YOUR::  jsr     R1,INLMES
+        .asciz  /Your /
+        .even
+        rts     PC
+
+YOUE2:  bitb    #^B01000000,UNIT1(R3)   ;player 2?
+        bne     YOUR            ;yes
+
+ENEMY:  jsr     R1,INLMES
+        .asciz  /Enemy /
+        .even
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; KILLml, DESTRO
+; Purpose: Print message that R0 units of type R1 have been destroyed.
+; Use:
+;       mov     num,R0
+;       mov     type,R1
+;       call    KILLml
+;
+
+KILLml::
+        .curs   3,20
+        call    DECPRT          ;type R0
+        call    SPACE
+        call    NMES
+
+DESTRO: jsr     R1,INLMES
+        .ascii  / destroyed. /
+        .byte   eold            ;clear to end of line
+        .even
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; KILL
+; Purpose: Destroy a unit given unit # in R3. If a T or C, destroy any
+;          armies or fighters aboard and type message.
+; Use:
+;       mov     uninum,R3
+;       call    KILL
+;
+
+KILL::  push    R0
+        push    R1
+        push    R2
+        asl     R3              ;word
+        push    UNILOC(R3)      ;push loc of unit
+        clr     UNILOC(R3)      ;destroy unit
+        asr     R3              ;byte
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get type
+        call    TCAF            ;T or C?
+        bcs     done            ;no
+
+        clrb    MAPNUM          ;ref map
+        mov     (SP),R0         ;get loc
+        mov     R1,R2           ;save
+        call    MAP             ;see what's there
+        cmpb    #-2,TYP(R1)     ;is it a city?
+        beq     done            ;yes, assume all As and Fs are in port
+        mov     R2,R1           ;restore R1
+        clr     R0              ;# of units destroyed.
+        mov     #UNILOC+<UNIMAX*2>,R2   ;pointer to unit locs
+
+loop:   cmp     -(R2),(SP)      ;locs match?
+        bne     1$              ;no
+        inc     R0              ;another destroyed
+        clr     (R2)            ;zero UNILOC
+1$:     cmp     #UNILOC,R2      ;done?
+        bne     loop            ;no
+
+        tstb    WATCH(R5)       ;watching this guy?
+        beq     done            ;no
+        call    KILLml          ;announce destruction
+
+done:   tst     (SP)+           ;pop junk
+        pop     R2
+        pop     R1
+        pop     R0
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; SETLOC
+; Purpose: Given unit number in R3, set up local variables for unit.
+; Use:
+;       mov     unitnum,R3
+;       call    SETLOC
+;
+; Registers: R0,R1,R4 destroyed
+
+SETLOC::
+        push    R2
+        asl     R3              ;word
+        mov     UNILOC(R3),R0   ;get loc
+        push    R0
+        mov     R0,LOC(R5)      ;into loc
+        clrb    MAPNUM          ;ref map
+        call    MAP             ;get AB
+        movb    R1,AB(R5)       ;store AB
+        mov     UNIILA(R3),ILA(R5)      ;ILA
+        asr     R3              ;byte
+        movb    UNIT1(R3),R0    ;so we can unpack it
+        bic     #^O177700,R0    ;clear all but hits
+        movb    R0,HITS(R5)     ;store result
+        movb    UNIT2(R3),R0    ;so we can unpack it
+        mov     R0,R1           ;save it
+        bic     #^O177770,R1    ;unpack low 3 bits
+        movb    R1,TYPE(R5)     ;which is the unit type
+        asr     R0
+        asr     R0
+        asr     R0              ;unpack left 5 bits
+        bic     #^O177740,R0    ;no bits coming from left
+        movb    R0,IFO(R5)      ;which is IFO
+        mov     #LTR+8,R4
+        add     R5,R4           ;R4= pointer into LTR
+        mov     #7,R2           ;direction
+1$:     mov     (SP),R0         ;get loc
+        call    ARROW           ;compute new loc
+        call    MAP             ;find out what's there
+        movb    R1,-(R4)        ;store result in LTR
+        dec     R2
+        bpl     1$
+        pop     R0              ;R0=LOC(R5)
+        pop     R2
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; RESLOC
+; Purpose: Assemble UNILOC, UNIILA, UNIT1 & UNIT2 from local variables.
+; Use:
+;       mov     unitnum,R3
+;       call    RESLOC
+;
+; Registers: R0 destroyed.
+;
+
+RESLOC::
+        push    R0
+
+;first test to see if it's the right unit
+        mov     R3,R0
+        asl     R0
+        tst     UNILOC(R0)      ;does unit exist?
+        beq     1$              ;no
+        call    CHKOWN          ;own it?
+        bcs     1$              ;no
+
+        mov     LOC(R5),UNILOC(R0)
+        mov     ILA(R5),UNIILA(R0)
+        bicb    #^O77,UNIT1(R3)         ;clear lower 6 bits
+        bisb    HITS(R5),UNIT1(R3)      ;put hits in lower 6 bits
+        movb    IFO(R5),R0              ;get ifo
+        asl     R0
+        asl     R0
+        asl     R0              ;put in bits 3-7
+        bisb    TYPE(R5),R0     ;set type bits
+        movb    R0,UNIT2(R3)    ;put in UNIT2
+
+1$:     pop     R0
+        rts     PC
+
+
+        .end
+
+
+.

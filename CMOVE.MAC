@@ -1,0 +1,378 @@
+
+; CMOVE.MAC     20-Nov-82
+; Globals defined:      CMOVE
+        .globl  TYPE,TYP,OWN,IFO,LOC,ILA,BELL,ROUND,FNDCIT
+        .globl  HITS,ARMYco,FIGHco,SHIPco,IDLE,DIR,DIR3,ARROW,BORDER,RANDOM
+        .globl  OKMOVE,LOCI,TROOPT,INMASK,PATHn,ARRLOC,ABOARD,ABD,TTin
+        .globl  ARMYif,FIGHif,SHIPif,TROOif,CARRif,OPT,MOVDIR,LTR,PORT,HITTAB
+        .globl  FNDUNI,PLYNUM,FIPATH,PHASIN,MAP
+        .globl  ADRMES,MAPNUM,MAPN,TYPCIT,RESLOC,DIST,HITTAB
+        .globl  HEADNG,PCUR2,CHKOWN,CITMAX,TARGET,CITLOC,SEAHI,SEALO,AROUND
+        .globl  FNCPRT,PATHo,GAS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; CMOVE
+; Purpose: Take care of computer moves. Returns move for R3 unit in R2.
+; Use:
+;       mov     #unitnum,R3
+;       call    SETLOC
+;       call    CMOVE
+;
+; R0,R1,R4 destroyed
+
+CMOVE::
+        call    IDLE            ;switch players
+        call    ABOARD          ;find out how many As, Fs are aboard
+        movb    R0,ABD(R5)      ;store in ABD
+;first set up DIR and DIR3
+        mov     R3,R0           ;get unit num
+        bic     #^O177776,R0    ;all but last bit
+        bne     1$              ;=1
+        dec     R0              ;=-1
+1$:     mov     R0,DIR(R5)      ;DIR = -1 or 1
+        asl     R0
+        add     DIR(R5),R0
+        mov     R0,DIR3(R5)     ;DIR3 = DIR * 3
+
+        clrb    OPT             ;no optimize
+        movb    MAPN(R5),MAPNUM ;set map #
+
+        call    ARRLOC
+        ifb     PLYNUM(R5) ne #2, 4$
+        call    HEADNG
+4$:     call    IFOEVA          ;do we need a new ifo?
+        bcc     2$              ;no
+        call    NEWIFO          ;get new ifo
+2$:
+          .if   eq,debug
+        ifb     #2 ne PLYNUM(R5), 5$
+        ifb     TYPE(R5) eq #A, 5$
+        .curs   1,40
+        movb    IFO(R5),R1
+        mov     ILA(R5),R0
+        call    FNCPRT
+        call    MOVSEL          ;select move based on ifo & ila
+        .cmes   2,20,<Movsel: >,eol
+        mov     R2,R0
+        call    DECPRT
+        call    MOVCOR          ;correct the move
+        .cmes   2,32,<Movcor: >
+        mov     R2,R0
+        call    DECPRT
+        mov     LOC(R5),R0
+        call    PCUR2-4
+        ifb     IFO(R5) ne #13, 3$
+;       call    TTin
+3$:     rts     PC
+5$:
+          .endc
+        call    MOVSEL
+        jmp     MOVCOR
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; IFOEVA
+; Purpose:      Evaluate IFO. If it's still good, C=0. If a new IFO is needed,
+;               C=1. ILA may be modified by IFOEVA. OPT and MAPNUM must be set
+; Use:
+;       call    IFOEVA
+;
+; R0,R1,R2,R4 destroyed.
+;
+; IFO=  0:      no function
+;       1:      go to TT# (A)
+;       2:      directional, kamikaze (F)
+;       3:      directional
+;       4:      target, kamikaze (F)
+;       5:      target location
+;       6:      goto carrier # (F)
+;       7:      goto city loc (F, ships)
+;       8:      damaged (ships)
+;       9:      stationed (C)
+;       10:     heading towards station (C)
+;       11:     city target (ships)
+;       12:     TT# escort (ships)
+;       13:     look @ unexplored territory (ships)
+;       14:     load up armies (T)
+;       15:     city target (A)
+;       16:     Move in a certain direction, or follow shore (A)
+;       17:     A on board a T (A)
+
+IFOEVA:
+;if the unit is a ship, determine if it's damaged
+        movb    TYPE(R5),R1     ;get unit type
+        ifb     R1 lo #D, 1$    ;if not a ship
+        movb    HITTAB(R1),R0   ;get max # of hits
+        asr     R0              ;/2
+        ifb     R0 lo HITS(R5), 1$      ;if hits > 1/2 max
+        ifb     IFO(R5) eq #8, 1$       ;if already heading to port
+        call    PORT            ;search for a port
+
+;if the unit is a T with ifo<>14 and no armies are aboard, clear ifo
+1$:     ifb     R1 ne #T, 2$            ;if not a T
+        ifb     IFO(R5) eq #14, 2$      ;if ifo=14
+        tstb    ABD(R5)         ;armies aboard?
+        bne     2$              ;yes
+        clrb    IFO(R5)         ;new ifo
+
+2$:     mov     LOC(R5),R0      ;get loc of unit
+        mov     ILA(R5),R1      ;get ila of unit
+
+        movb    IFO(R5),R4      ;get ifo
+        asl     R4              ;word
+        jmp     @IFOTAB(R4)     ;IFO processor
+
+IFOTAB: .word   new2    ;0
+        .word   IFO1    ;1
+        .word   IFO2    ;2
+        .word   IFO3    ;3
+        .word   IFO7    ;4
+        .word   IFO7    ;5
+        .word   IFO6    ;6
+        .word   IFO7    ;7
+        .word   IFO8    ;8
+        .word   IFO9    ;9
+        .word   IFO10   ;10
+        .word   IFO11   ;11
+        .word   new2    ;12
+        .word   IFO13   ;13
+        .word   IFO14   ;14
+        .word   IFO15   ;15
+        .word   new2    ;16
+        .word   new2    ;17
+
+IFO1:   ifb     UNIT2(R1) ne #<14*8>+T, new2    ;if not a T with IFO=14
+        push    R3
+        mov     R1,R3           ;get T #
+        call    CHKOWN          ;do we own it?
+        pop     R3
+        bcs     new2            ;no
+        asl     R1
+        mov     LOC(R5),UNIILA(R1)      ;set ILA of T to LOC of army
+        mov     UNILOC(R1),R1   ;get loc of T
+        beq     new2            ;doesn't exist
+        if      R0 eq R1, new2  ;if we're aboard the T
+        br      sel2
+
+IFO2:   movb    #16,R0
+        call    RANDOM          ;get random # 0-15
+        bne     sel2            ;15/16 chance
+        add     DIR(R5),R1      ;change direction
+        bic     #^O177770,R1    ;normalize
+        mov     R1,ILA(R5)      ;set new ila
+        br      sel2
+
+IFO3:   ifb     TYPE(R5) ne #F, IFO2    ;if not an F
+        ifb     GAS(R5) eq #10, new2    ;if at 1/2 range
+        br      IFO2
+
+IFO6:   asl     R1              ;word
+        mov     UNILOC(R1),R1   ;get loc of C
+        beq     new2            ;C doesn't exist
+
+IFO7:   if      R0 eq R1, new2          ;if we arrived at ILA
+        ifb     TYPE(R5) ne #F, sel2    ;if unit isn't an F
+        call    DIST                    ;how far from F to ILA?
+        ifb     GAS(R5) lo R0, new2     ;if fuel left < dist to go
+
+sel2:   clc
+        rts     PC
+
+IFO8:   movb    TYPE(R5),R2                     ;get unit type
+        ifb     HITS(R5) eq HITTAB(R2), new2    ;if repaired
+        mov     R1,R0                           ;ila
+        call    MAP                             ;what's at ila?
+        ifb     OWN(R1) eq PLYNUM(R5), sel2     ;if we own it
+        call    PORT                            ;find another one
+        br      sel2
+
+;reset if no TARGET cities are within fighter range
+IFO9:   mov     #CITMAX,R2      ;city index
+loop:   mov     R2,R4
+        add     R5,R4
+        tstb    TARGET-1(R4)    ;is city a target?
+        beq     eoloop          ;no
+        mov     R2,R4
+        asl     R4
+        mov     CITLOC-2(R4),R0         ;get loc of city
+        call    DIST                    ;find dist from ila to city
+        if      R0 los #10, sel2        ;if dist <= 10
+eoloop: sob     R2,loop
+
+new2:   sec
+        rts     PC              ;need new code
+
+IFO10:  if      R0 ne R1, 1$    ;if we haven't arrived at ila
+        movb    #9,IFO(R5)      ;station the C at ila
+        br      sel2
+
+1$:     mov     R1,R0
+        call    MAP             ;what's at ila?
+        tstb    R1              ;blank?
+        beq     sel2            ;yes
+        ifb     R1 eq #2, sel2  ;if R1 = '.'
+        br      new2
+
+IFO11:  mov     R1,R0           ;get destination
+        call    MAP             ;what's there?
+        ifb     PLYNUM(R5) ne OWN(R1), sel2     ;if we don't own that city
+        mov     LOC(R5),R1      ;get loc of unit
+        call    DIST            ;find dist from ila to loc
+        if      R0 hi #10, new2 ;if dist>10
+        if      R0 eq #1,  new2 ;if dist=1
+        br      sel2
+
+IFO13:  mov     R1,R0           ;get destination
+        call    MAP             ;what's there?
+        tst     R1              ;is it unexplored?
+        bne     new2            ;no
+        mov     R0,R1           ;end
+        mov     LOC(R5),R0      ;beg
+        jsr     R5,PATHn        ;path from beg to end?
+        ;          *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B1010000011111110,^B0111111100000000,1 ;ship
+        bcs     new2            ;no
+        br      sel2
+
+IFO14:  movb    HITS(R5),R1             ;get # of hits
+        if      ROUND(R5) los #150, 1$  ;if round<=150
+        asl     R1                      ;*2
+1$:     ifb     ABD(R5) his R1, new2    ;if T is full
+        br      sel2
+
+IFO15:  jsr     R5,PATHn        ;path from LOC to ILA?
+        ;          *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B1101111100000001,^B1000000000000000,1
+        bcs     new2            ;no
+        mov     R1,R0           ;get loc of city
+        call    MAP             ;what's there?
+        ifb     OWN(R1) eq PLYNUM(R5), new2     ;if city is conquered
+        br      sel2                            ;no
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; NEWIFO
+; Purpose:      Select a new ifo and ila for the unit.
+; Use:
+;       call    NEWIFO
+;
+; R0,R1,R2,R4 destroyed
+;
+
+NEWIFO: movb    TYPE(R5),R1     ;get unit type
+        asl     R1              ;word
+        jmp     @TYPTAB(R1)     ;to processing routine
+
+TYPTAB: .word   ARMYif
+        .word   FIGHif
+        .word   SHIPif
+        .word   TROOif
+        .word   SHIPif
+        .word   SHIPif
+        .word   CARRif
+        .word   SHIPif
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; MOVSEL
+; Purpose: Given IFO & ILA, select a move and put it in R2.
+; Use:
+;       call    MOVSEL
+;
+; R0,R1,R2,R4 destroyed
+;
+
+MOVSEL: movb    IFO(R5),R1      ;get ifo
+        asl     R1              ;word
+        jmp     @seltab(R1)     ;processing routine
+
+seltab: .word   error ,seluni,seldir,seldir,selloc      ;0-4
+        .word   selloc,seluni,selloc,selloc,selloc      ;5-9
+        .word   selloc,selloc,seluni,selloc,selloc      ;10-14
+        .word   selloc,selfol,selTTr                    ;15-17
+
+error:  .cmes   4,0,<MOVSEL>
+        halt
+
+selTTr: mov     #-1,R2          ;don't move
+        rts     PC
+
+;directional, but follow the shore
+selfol: mov     ILA(R5),R2      ;get direction
+        sub     DIR3(R5),R2     ;go back 3
+        bic     #^O177770,R2    ;normalize
+        call    OKMOVE          ;is it a good move?
+        blo     L1              ;no
+
+;directional, don't follow shore
+seldir: mov     ILA(R5),R2      ;go straight ahead
+L1:     call    AROUND          ;look for okmove
+        bcc     3$              ;got one
+        mov     ILA(R5),R2      ;default
+        rts     PC
+
+3$:     mov     R2,ILA(R5)      ;set new ila
+        rts     PC
+
+seluni: mov     ILA(R5),R1      ;get unit #
+        asl     R1              ;word
+        mov     UNILOC(R1),R1   ;get TO location
+        beq     error           ;unit doesn't exist
+        br      locs
+
+selloc: mov     ILA(R5),R1      ;TO location
+        bit     #^O177770,R1    ;is R1 a direction?
+        beq     seldir          ;yes
+
+locs:   if      LOC(R5) ne R1, 1$       ;if not at destination
+        mov     #-1,R2                  ;if at dest then don't move
+        rts     PC
+
+1$:     movb    TYPE(R5),R2     ;get unit type
+        ifb     R2 los #D, 2$   ;if A,F,D
+        movb    #D,R2           ;use ship mask
+2$:     ifb     PLYNUM(R5) ne #2, 3$    ;if not player 2
+        add     #3,R2                   ;use plyr 2 masks
+3$:     asl     R2
+        asl     R2              ;each mask is 4 bytes long
+        add     #msktab,R2      ;pointer to mask
+        mov     #msk,R0         ;destination address
+        mov     (R2)+,(R0)+
+        mov     (R2)+,(R0)+     ;transfer mask
+        mov     DIR(R5),(R0)    ;load dir
+        mov     LOC(R5),R0      ;from
+        jsr     R5,PATHo        ;compute move
+msk:    .blkw   3               ;args for PATH
+        bcc     1$              ;success
+        jmp     MOVDIR          ;default
+1$:     rts     PC
+
+msktab: ;          *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B1101101100000001,^B1000000000000000   ;a
+        .word   ^B1011011111111110,^B0000001000000000   ;f
+        .word   ^B1010010011111110,^B0111111100000000   ;ship
+
+        .word   ^B1101011100000001,^B1000000000000000   ;A
+        .word   ^B1011100000000101,^B1111111100000000   ;F
+        .word   ^B1010100011111110,^B0111111100000000   ;SHIP
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; MOVCOR
+; Purpose:      Given local variables and a trial move in R2, correct
+;               that move.
+; Use:
+;       mov     trialmove,R2
+;       call    MOVCOR
+;
+; R0,R1,R4 destroyed. R2 corrected.
+;
+
+MOVCOR: movb    TYPE(R5),R1
+        asl     R1
+        jmp     @cortab(R1)     ;processing routine
+
+cortab: .word   ARMYco,FIGHco,SHIPco,SHIPco,SHIPco,SHIPco,SHIPco,SHIPco
+
+        .end
+
+
+
+.

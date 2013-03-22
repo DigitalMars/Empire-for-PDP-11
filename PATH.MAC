@@ -1,0 +1,313 @@
+
+; PATH.MAC      11-Sep-82
+; Purpose:      Find a path from one loc to another.
+
+        .globl  LOCPRT,DIST,MOVDIR,ARROW,CURMES,OPT,INMASK,MAPN
+        .globl  TTclr,CURSOR,CURx,CURy,INSECT,TTcurs,BORDER
+        .globl  MAPS,MAPNUM,MAPTAB,FNDMAP,SECTOR,PCUR2,MAPPRT
+        .globl  MAP,BELL,CRLF,TTout,DECPRT,INLMES
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; PATBLK,PATCNT,PATLND
+
+PATBLK::
+        push    R2              ;path by land and blanks?
+        jsr     R5,PATHn
+;                  *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B1001001100000001,^B1000000000000000,1
+retpat: pop     R2
+        rts     PC
+
+PATCNT::
+        push    R2              ;on same continent?
+        jsr     R5,PATHn
+;                  *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B0001111100000001,^B1000000000000000,1
+        br      retpat
+
+PATLND::                        ;path by land only?
+        push    R2
+        jsr     R5,PATHn
+;                  *.+OXAFFDTSRCBa   ffdtsrcb
+        .word   ^B0001001100000001,^B1000000000000000,1
+        br      retpat
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; PATH,PATHo,PATHn
+; Purpose:      Find a path from loc1 to loc2.
+;               PATHo and PATHn are alternate entries to PATH which set
+;               MAPNUM and OPT.
+; Inputs:
+;       MAPNUM: Set by the caller to the map number (0,1,2)
+;       OPT:    0=don't optimize, else optimize
+;       R0:     loc1 (from)
+;       R1:     loc2 (to)
+;       maskhi,masklo:  32 bit bit map containing values tagged
+;                       with 1 (can move there) or 0 (can't move there).
+;                       Bits correspond to bytes in MAPTAB.
+;       dir:    1 or -1 (which way we turn from an obstacle)
+; Use:
+;       jsr     R5,PATH
+;       .word   maskhi
+;       .word   masklo
+;       .word   dir
+;
+; Output:
+;       C:      0 if we found a path from loc1 to loc2, or loc1=loc2.
+;               Note: The map value for loc2 does not have to be in mask fo
+;                     PATH to succeed.
+;               1 if we failed.
+;       R0,R1:  Preserved.
+;       R2:     Direction of next move to take (if C=1 then R2 is garbage).
+;               If loc1=loc2, then R2=garbage.
+;
+; Variables we'll need:
+; SP -> curloc          ;current location
+;       movnum|maxmve   ;#of moves tried | max # of tries
+;       dir3            ;=dir*3
+;       begdir          ;dir that we started out with
+;       R4sav
+;       R3sav           ;place to save R3 and R4
+;       beg             ;beginning of path
+
+.macro  byte    arg
+        arg=    num
+        num=    num+1
+.endm
+
+.macro  word    arg
+        arg=    num
+        num=    num+2
+.endm
+
+;get stack offsets of our variables
+        num=2           ;no offset for curloc
+        byte    maxmve
+        byte    movnum
+        word    dir3
+        word    begdir
+        word    R3sav
+        word    R4sav
+        word    beg
+
+; other variables:
+end:    .blkw   1       ;loc2 (loc we're finding a path to)
+bakadr: .blkw   1       ;return addr from okmove
+move1:  .blkb   1       ;move direction from beg
+movsav: .blkb   1       ;temporary storage for chknxt
+
+; register assignments:
+; R0:   current location
+; R1:   map value
+; R2:   direction
+; R3:   scratch
+; R4:   top of track stack
+
+PATHo:: movb    #-1,OPT         ;optimize path
+        br      p1
+
+PATHn:: clrb    OPT             ;no optimize
+p1:     mov     (SP),R2         ;get R5 off stack
+        movb    MAPN(R2),MAPNUM ;set to player map
+
+PATH::
+;initialize variables
+        mov     (R5)+,maskhi    ;set up maskhi
+        mov     (R5)+,masklo    ;leave R5->dir
+        push    R0              ;beg
+        mov     R1,end
+        push    R3
+        push    R4              ;save R3,R4
+        mov     (R5),R3         ;get dir
+        push    R3              ;begdir
+        push    R3
+        asl     R3
+        add     R3,(SP)         ;dir3
+        mov     R0,R3           ;save beg in R3
+        call    DIST            ;distance from beg to end
+        asl     R0
+        add     #50,R0
+        push    R0              ;maxmve
+        movb    R0,1(SP)        ;movnum
+        push    R3              ;curloc
+        mov     #track,R4       ;init track stack
+
+strght: mov     (SP),R0         ;get curloc
+        mov     end,R1
+        cmp     R0,R1           ;already there?
+        beq     succes          ;yes
+        call    armain          ;can we move there?
+        bcc     folshr          ;nope, follow the shore
+
+okstr:  mov     #strght,bakadr  ;next time we want to go straight
+
+;The move is legit and we will use it. R0 is location to move to, R2 is
+;direction from (SP) to get there.
+okmove: cmp     (SP),beg(SP)    ;see if we're at the beginning
+        bne     1$              ;no
+        movb    R2,move1        ;update initial move
+1$:     mov     R0,(SP)         ;update current location
+        cmp     R0,end          ;see if we're done
+        beq     success         ;yes
+
+domore: decb    movnum(SP)      ;movement counter
+        beq     trydir          ;assume it didn't work
+        tstb    OPT             ;are we to optimize?
+        beq     1$              ;no
+        cmp     bakadr,#chknxt  ;following the shore?
+        bne     1$              ;no
+        call    optpth          ;optimize the path (R1,R3 destroyed)
+1$:     jmp     @bakadr         ;to strght or chknxt
+
+;try the other rotation direction
+trydir: neg     dir3(SP)
+        neg     (R5)            ;try other direction of rotation
+        cmp     (R5),begdir(SP) ;see if already tried
+        beq     failur          ;yes, failure
+
+        movb    maxmve(SP),movnum(SP)   ;reset movement counter
+        mov     beg(SP),(SP)    ;reset curloc
+        mov     #track,R4       ;reset track pointer
+        br      strght          ;first try going straight
+
+succes: movb    move1,R2        ;initial move
+        add     #8,SP           ;pop junk off of stack
+        clc                     ;indicate success
+ret:    pop     R4
+        pop     R3
+        mov     end,R1          ;restore R1
+        pop     R0              ;beg
+        bitb    (R5)+,(R5)+     ;add 2 to R5 w/o affecting C
+        rts     R5
+
+;We've run into an obstacle. Follow the shore.
+folshr: mov     (SP),R0         ;get curloc
+        mov     R2,R3           ;save failed move
+        sub     dir3(SP),R2     ;go back 3
+        bic     #^O177770,R2    ;lop off extraneous bits
+        push    R2              ;save move
+        call    armap           ;can we move there?
+        bcc     stfol           ;no
+        mov     R3,(SP)         ;else don't go back 3
+
+stfol:                          ;move index is on top of stack
+        mov     #8,R3           ;loop counter
+
+loop:   mov     (SP),R2         ;get move index
+        bic     #^O177770,R2    ;convert into a proper move (0-7)
+        mov     2(SP),R0        ;get curloc
+        call    ARROW           ;move to new loc
+        call    BORDER          ;on border?
+        bcs     eoloop          ;yes, no good
+        call    mapinm          ;can we move there?
+        bcc     eoloop          ;no
+
+        tst     (SP)+           ;throw away loop index
+        mov     #chknxt,bakadr  ;jump addr
+        br      okmove          ;the move is ok
+
+eoloop: add     (R5),(SP)       ;try next direction
+        sob     R3,loop         ;loop till no more directions
+        tst     (SP)+           ;throw away loop index
+
+failur: add     #8,SP           ;pop garbage
+        sec                     ;indicate failure
+        br      ret             ;return
+
+chknxt: mov     R2,R3           ;save last folshr move
+        mov     (SP),R0         ;get current location
+        mov     end,R1
+        call    MOVDIR          ;straight direction
+        call    ARROW           ;move towards end
+        movb    R2,movsav       ;save strght move
+        mov     R3,R2           ;restore last move
+        call    mapinm          ;can we move there?
+        bcc     folshr          ;no
+
+        mov     R4,R3           ;pointer onto track
+2$:     cmp     #track,R3       ;done?
+        beq     1$              ;yes
+        cmp     (SP),-(R3)      ;see if curloc is already in array
+        beq     folshr          ;yes, follow the shore
+        br      2$
+
+1$:     mov     (SP),(R4)+      ;enter curloc into track
+        cmp     R4,#track+100   ;see if track is full
+        bcc     trydir          ;yes, that dir won't work
+        movb    movsav,R2       ;get strght move
+        jmp     okstr           ;all clear for going straight
+
+
+track:  .blkw   100     ;Array with a list of locs where we stopped
+                        ;following the shore and went straight. This is
+                        ;necessary so we don't go around in circles.
+
+;***********************
+; OPTPTH
+; Purpose: See if we can find a straight line from beg to curloc. If so,
+;          update move1 to reflect this.
+;
+; Use:
+;       mov     curloc,R0
+;       call    optpth
+;
+; Requires stack set up by path.
+; R1,R3 destroyed.
+;
+
+optpth: push    R0
+        push    R2
+        push    R4
+        mov     R0,R4           ;R4 is where we're going
+        mov     beg+8(SP),R0    ;from beg
+        mov     R4,R1           ;arg for MOVDIR
+        call    MOVDIR          ;initial move
+        mov     R2,R3           ;save it
+2$:     call    armain          ;can we move there?
+        bcc     1$              ;can't find straight line
+
+        mov     R4,R1           ;restore end
+        cmp     R0,R4           ;see if we got there
+        bne     2$              ;no
+
+        movb    R3,move1        ;new move
+1$:     pop     R4
+        pop     R2
+        pop     R0
+        rts     PC
+
+
+;************************
+; ARMAIN & ARMAP & MAPINM
+; Purpose:      Simplify calling MOVDIR, ARROW, MAP and INMASK.
+; Use:
+;       mov     loc,R0
+;       mov     loc2,R1         ;for ARMAIN
+;       mov     direc,R2        ;move direction for ARMAP
+;       call    ARMAIN or ARMAP or MAPINM
+;
+; Output:
+;       C:      0 if not in mask, 1 if in mask or R0+ARROW(R2)=end
+;       R0:     new loc (ARMAIN or ARMAP), preserved (MAPINM)
+;       R1:     map value at loc
+;       R2:     preserved
+;
+
+armain: call    MOVDIR          ;get move from loc to loc2
+armap:  call    ARROW           ;move to new loc
+mapinm: cmp     R0,end          ;have we arrived at end?
+        bne     1$              ;no
+        sec                     ;it's good
+        rts     PC
+
+1$:     call    MAP             ;what's there?
+        jsr     R5,INMASK
+maskhi: .blkw
+masklo: .blkw
+        rts     PC
+
+
+        .end
+
+
+.

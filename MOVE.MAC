@@ -1,0 +1,410 @@
+
+; MOVE.MAC      12-May-83
+
+        .globl  MOVE,SNSFLG             ;globals defined
+
+        .globl  CMOVE,HMOVE,CHKOWN,TCAF,TARGET,GAS
+        .globl  HITTAB,ARROW,MAP,INMASK,SEAHI,SEALO,KILLml
+        .globl  PLYR,SENSOR,HITS,TYPE,LOC,AC,AB,TYP,OWN,PLYNUM,WATCH,RANDOM
+        .globl  FNDCIT,MAPNUM,CHAMAP,CITOWN,PLYTYP,DELAY,PHASIN,CITPHS
+        .globl  UNIMES,SETLOC,RESLOC,UPDMAP,FIGHT,KILL,LOCDOT
+
+.macro  .watch  lbl
+        tstb    WATCH(R5)
+        beq     lbl
+.endm
+
+;;;;;;;;;;;;;;;;;;;;
+; Move a unit, evaluate the result
+; Input:
+;       R3 =    unit #
+;       R5 =    player offset
+; Output:
+;       R0,R1,R2,R4     destroyed
+;
+
+locold:  .blkw  1       ;previous LOC of unit
+SNSFLG: .blkb   1       ;If we destroy an enemy unit, we should call SENSOR
+         .even          ;for him, which is what this flag does.
+
+MOVE:
+        push    R3
+        clr     -(SP)           ;# of turns
+
+loop:   call    SETLOC          ;first set up the local variables
+        mov     LOC(R5),R0
+        call    CHKLOC
+        call    SENSOR          ;bring map up to date
+
+;call the appropriate move subroutine
+        tstb    PLYTYP(R5)      ;computer or human
+        beq     1$              ;branch if computer
+        call    HMOVE           ;human move
+        br      2$
+
+1$:     call    CMOVE           ;computer move
+2$:     call    evalu8          ;evaluate move
+
+        tst     R0              ;is unit around?
+        beq     end             ;no
+        call    eomove          ;do sensor probes
+        call    drag
+        call    RESLOC          ;restore local variables
+        call    CHKLOP          ;do we get another turn?
+        bcc     end             ;no
+        inc     (SP)            ;# of turns
+        br      loop
+
+end:    tst     (SP)+           ;pop turn #
+        pop     R3
+        rts     PC
+        .page
+;--------------------------------------------------------------
+; Evaluate the move, first making sure that the unit still exits
+; Input:
+;       R2 =    move
+;       R3 =    unit #
+;       R5 =    plyr offset
+; Output:
+;       R0 =            new loc of unit
+;       locold =        old loc of unit
+;       SNSFLG <>       0 if do sensor for enemy
+;       R1,R2,R4        destroyed
+
+evalu8: call    CHKDIR          ;see that R2 is OK
+        mov     R3,R0           ;unit #
+        asl     R0
+        tst     UNILOC(R0)      ;if UNILOC=0, then unit was destroyed
+        beq     4$              ;it was destroyed during HMOVE or CMOVE
+        call    CHKOWN          ;same owner?
+        bcc     3$              ;yes
+4$:     clr     R0              ;indicate unit was destroyed
+        rts     PC              ;not same unit, must have been destroyed
+
+3$:     mov     LOC(R5),locold  ;remember LOC for drag subr.
+        clrb    SNSFLG          ;if it's set, then we do SENSOR for enemy
+        call    UPDLST          ;update location we just left
+
+;Now look where we're going
+        mov     LOC(R5),R0      ;get current loc
+          .if eq,debug
+        call    CHKLOC
+          .endc
+        call    ARROW           ;get new loc
+        mov     R0,LOC(R5)      ;new LOC
+        clrb    MAPNUM          ;ref map
+        call    MAP             ;see what's there
+        movb    R1,AC(R5)       ;new AC
+
+;We can't attack if we're an A on a T. (require's R2=move)
+        tstb    TYPE(R5)        ;army?
+        bne     notsp           ;no
+        movb    AB(R5),R1       ;get map val we just left
+        ifb     TYP(R1) ne #T, notsp    ;if not on a T
+        tstb    R2              ;no move?
+        bmi     notsp           ;yes
+        movb    AC(R5),R1       ;get where we're going
+        jsr     R5,INMASK       ;is it sea?
+        .word   SEAHI,SEALO
+        bcs     drown           ;yes
+
+;See if we have something to fight, and fight it
+notsp:  movb    AC(R5),R1       ;see where we're going
+          .if eq, DEBUG
+        call    CHKMAP
+          .endc
+        tstb    TYP(R1)         ;is it something to fight?
+        bmi     army            ;no
+        ifb     OWN(R1) ne PLYNUM(R5), 2$       ;if enemy unit
+;If A moving onto T or F moving onto C, we don't want a battle
+        tstb    TYPE(R5)        ;A?
+        bne     1$              ;no
+        ifb     TYP(R1) eq #T, eom1     ;if A onto T
+1$:     ifb     TYPE(R5) ne #F, 2$      ;if not an F
+        ifb     TYP(R1) ne #C, 2$       ;if F isn't moving onto a C
+        jmp     land            ;land on the C
+
+2$:     call    FIGHT           ;do battle
+        bcs     killit          ;attacker eats it
+        call    UPDMAP          ;remove defender's carcass
+        movb    R1,AC(R5)       ;update AC
+
+;Take care of armies
+army:   movb    AC(R5),R2       ;put AC into R2
+        tstb    TYPE(R5)        ;army?
+        bne     fightr          ;no
+        ifb     R2 eq #2, drown ;if moving onto water
+        ifb     R2 ne #3, 2$    ;if not moving onto land
+        jmp     change          ;yes
+
+2$:     call    ATTCIT          ;then must be moving onto a city
+        br      killit          ;which always destroys the army
+
+drown:  .watch  killit
+        .cmes   1,20,<Your army marched into the sea and drowned.>,eold
+
+killit: call    KILL            ;kill unit
+        mov     LOC(R5),R0      ;for eomove
+        clr     LOC(R5)         ;so RESLOC won't restore it
+eom1:   rts     PC
+
+
+;Take care of fighters.
+fightr: ifb     TYPE(R5) ne #F, ship    ;if not F, then it must be a ship
+        ifb     TYP(R2) ne #-2, chkrng  ;if not moving onto a city
+        ifb     OWN(R2) eq PLYNUM(R5), land     ;if we own this city
+        .watch  1$
+        .cmes   1,20,<Your fighter was shot down over the enemy city.>,eold
+1$:     br      killit
+
+land:   movb    HITTAB+F,HITS(R5)       ;reset range
+        .watch  1$
+        .cmes   1,20,<Landing confirmed at >
+        call    LOCDOT
+1$:     rts     PC
+
+chkrng: decb    GAS(R5)         ;dec range left
+        bne     change          ;still fuel left
+        .watch  1$
+        .cmes   1,20,<Your fighter ran out of fuel and crashed.>,eold
+1$:     jmp     killit
+
+change: call    .change
+        rts     PC
+
+;Take care of ships.
+ship:   ifb     R2 eq #2, change        ;if AC = '.'
+;then we either 1) ran aground or 2) docked.
+        ifb     OWN(R2) ne PLYNUM(R5), agnd     ;if ran aground
+        incb    HITS(R5)                        ;it's in port, repair it
+        movb    TYPE(R5),R1                     ;get ship type
+        ifb     HITS(R5) los HITTAB(R1), 2$     ;if max hits not exceeded
+        decb    HITS(R5)                        ;bring back into line
+2$:     .watch  1$
+        .cmes   1,20,<Docking confirmed at >
+        call    LOCDOT
+1$:     rts     PC
+
+agnd:   .watch  1$
+        .cmes   1,20,<Your ship ran aground and sank.>,eold
+1$:     jmp     killit
+        .page
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Do sensor probes for us & enemy
+; Input:
+;       R0 =    loc
+;       R5 =    plyr offset
+
+eomove:
+        call    SENSOR          ;do probe for us
+        tstb    SNSFLG          ;sensor for other plyr?
+        beq     4$              ;no
+        mov     PLYR(R5),R5     ;swap players
+        call    SENSOR
+        mov     PLYR(R5),R5
+4$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; DRAG
+; Purpose: For Ts and Cs, drag along As and Fs that are aboard, and destroy
+;          any extra.
+; Use:
+;       call    DRAG            ;local variables are req'd
+; R0,R1,R2,R4 destroyed.
+
+num:    .blkb   1               ;number aboard
+numdes: .blkb   1               ;number thrown overboard
+nummax: .blkb   1               ;max # allowed
+        .even
+
+DRAG:   tst     LOC(R5)         ;does unit exist?
+        beq     7$              ;no
+        movb    AB(R5),R1
+        ifb     TYP(R1) eq #-2, 7$      ;if just left a city, drag nothing
+        mov     LOCOLD,R0       ;get prev loc
+        movb    HITS(R5),nummax ;max # allowed
+        movb    TYPE(R5),R1     ;get unit type
+        call    TCAF            ;T or C?
+        bcs     7$              ;not T or C so return
+        tstb    R1              ;T?
+        bne     1$              ;no
+        aslb    nummax          ;*2 for Ts
+
+1$:     clr     num                     ;clear num & numdes
+        mov     #UNILOC+<UNIMAX*2>,R4   ;UNILOC index
+        mov     #UNIMAX,R2              ;control count
+        push    R3              ;unit #
+        inc     (SP)            ;line up with R2
+
+3$:     if      R0 ne -(R4), 5$ ;if UNILOC <> OLDLOC
+        if      R2 eq (SP), 5$  ;don't count T or C
+        mov     LOC(R5),(R4)    ;drag unit to new spot
+        incb    num             ;# aboard
+        ifb     num los nummax, 5$      ;if less than overfull
+        clr     (R4)            ;throw it overboard
+        incb    numdes          ;# destroyed
+5$:     sob     R2,3$           ;loop
+        tst     (SP)+           ;restore SP
+
+        tstb    numdes          ;did we destroy any?
+        beq     7$              ;no
+        .watch  7$
+        .cmes   2,20,<Your ship is overloaded at >
+        mov     LOC(R5),R0
+        call    LOCDOT
+        movb    numdes,R0       ;arg for KILLml
+        call    KILLml
+7$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; GETCIT
+; Purpose: Take over city at LOC. Get new phase if human, else set phase
+;          to -1.
+; Use:
+;       call    GETCIT
+;
+; Registers: R0,R1 destroyed
+
+getcit: push    R3              ;save R3
+        .watch  5$
+        .cmes   0,20,<The city has been subjugated! The army was>,eol
+        .cmes   1,20,<dispersed to enforce iron control.>,eold
+        br      1$
+5$:     ifb     OWN(R2) ne #2, 1$       ;if comp didn't get human city
+        .cmes   3,20,<The city was conquered!>,eold
+1$:     mov     LOC(R5),R0      ;get loc of city
+        call    FNDCIT          ;get city # in R3
+        movb    #4,R1           ;'O'
+        ifb     OWN(R1) eq PLYNUM(R5), 2$       ;if right map val
+        incb    R1              ;then it's 'X'
+2$:     clrb    MAPNUM          ;ref map
+        call    CHAMAP          ;change map
+        tstb    CITOWN(R3)      ;did we take over enemy city?
+        beq     3$              ;no, it was unowned
+        decb    SNSFLG          ;set so we do SENSOR for enemy
+3$:     movb    PLYNUM(R5),CITOWN(R3)   ;set new owner
+        movb    #-1,CITPHS(R3)  ;so CITYPH and PHASIN will select a new phase
+        tstb    PLYTYP(R5)      ;human?
+        bne     7$              ;yes
+        add     R5,R3           ;player index
+        clrb    TARGET(R3)      ;remove target
+        br      6$
+
+7$:     jsr     R5,DELAY        ;time delay
+        .word   2
+        call    SENSOR          ;make sure map is up to date
+        call    PHASIN          ;get new city phase
+
+6$:     pop     R3
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; UPDLST
+; Purpose: Update the map loc that we just left:
+;          If (AB=city) or (AB='T' and TYPE='A') or (AB='C' and TYPE='F')
+;          Then don't change the map.
+; Use:
+;       call    UPDLST
+;
+; R0,R1 destroyed.
+;
+
+UPDLST: movb    AB(R5),R1               ;get AB
+        ifb     TYP(R1) eq #-2, 3$      ;if it's a city
+        movb    TYPE(R5),R0             ;get TYPE
+        bne     1$                      ;if TYPE<>'A'
+        ifb     TYP(R1) eq #T, 3$       ;if AB='T'
+1$:     ifb     R0 ne #F, 2$            ;if TYPE<>'F'
+        ifb     TYP(R1) eq #C, 3$       ;if fighter onboard carrier
+;Ok, update the map loc that we just left.
+2$:     mov     LOC(R5),R0      ;get old loc
+        jmp     UPDMAP          ;update it
+3$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;
+; Attack the city and determine the outcome.
+; Input:
+;       R0=     loc of city
+;       R2=     map val of city
+; Output:
+;       R0,R1   destroyed
+;       Plus what GETCIT does if city is taken over.
+
+ATTCIT: ifb     OWN(R2) ne PLYNUM(R5), 5$       ;if don't own city, attack it
+        .watch  4$
+        .cmes   0,20,<Your army attacked your own city!>,eold
+        br      6$              ;finish message
+
+;Attack the unowned city and determine outcome.
+5$:     ifb     OWN(R2) ne #2, 1$       ;if plyr 2 doesn't own it
+        .cmes   2,20,<Your city is under attack at >
+        call    LOCDOT
+
+1$:     mov     #2,R0
+        call    RANDOM
+        beq     3$              ;lost it (50%)
+        call    GETCIT          ;take over city
+        br      4$
+
+3$:     .watch  2$
+        .cmes   0,20,<The city's defenses crushed your assault!>,eold
+6$:     .cmes   1,20,<Your army was destroyed.>,eold
+        br      4$
+
+2$:     ifb     OWN(R2) ne #2, 4$       ;if not (comp attacking human city)
+        .cmes   3,20,<The enemy invasion was repelled.>,eold
+4$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given a loc in R0 and TYPE(R5), change the map to the proper map val.
+; Input:
+;       R0:     loc of unit
+; Output:
+;       R1      destroyed
+
+.CHANGE:
+        movb    TYPE(R5),R1     ;get unit type
+        add     #6,R1
+        ifb     PLYNUM(R5) ne #1, 1$    ;if not plyr 1
+        add     #9,R1                   ;player 2 values
+1$:     ifb     AC(R5) ne #2, 2$        ;if not sea
+        incb    R1              ;F has 2 values...
+2$:     clrb    MAPNUM          ;ref map
+        jmp     CHAMAP          ;change map to R1
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Test to see if we get another turn this round.
+; Inputs:
+;       2(SP)   # of turns completed already - 1
+; Outputs:
+;       C=0     no extra turns
+;       C=1     get extra turn
+;       R1      destroyed
+
+CHKLOP: tst     LOC(R5)         ;does unit exist?
+        beq     1$              ;no
+        movb    AC(R5),R1       ;where are we?
+        ifb     TYP(R1) eq #-2, 1$      ;if F or ship in city, then no extra
+                                        ;moves
+        movb    TYPE(R5),R1
+        ifb     R1 ne #F, 2$    ;if not a fighter
+        bitb    #^B11,HITS(R5)  ;(RANGE mod 4)=0?
+        beq     1$              ;yes
+3$:     sec                     ;get another turn
+        rts     PC
+
+2$:     bmi     1$              ;if army
+        tst     2(SP)           ;already got extra move?
+        bne     1$              ;yes
+        movb    HITTAB(R1),R1   ;get max # of hits
+        asr     R1
+        ifb     HITS(R5) hi R1, 3$      ;if HITS > hitmax/2, get another turn
+1$:     clc                     ;no extra turn
+        rts     PC
+
+        .end
+

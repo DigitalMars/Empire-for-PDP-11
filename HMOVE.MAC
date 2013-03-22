@@ -1,0 +1,503 @@
+; HMOVE.MAC	25-Nov-82
+; Globals defined:
+	.globl	HMOVE,VALCMD
+
+	.globl	HEADNG,TCAF,MYCODE,SURSEA,INSECT,CENTER,PCUR24,TTin,CMDCUR
+	.globl	TYPE,TYP,OWN,IFO,LOC,ILA,BELL,ROUND,FNDCIT,SENSOR,SAVGAM
+	.globl	HITS,TTinr,LSTVAR,CLRSEC,TTclr,IDLE
+	.globl	FNDUNI,PLYNUM,UNIT1,UNIT2,UNIMAX,UNILOC,FIPATH,PHASIN,MAP
+	.globl	UNIILA,ADRMES,MAPNUM,MAPN,TYPCIT,RESLOC,DIST,HITTAB
+
+;input modes
+	mdNONE=	0	;no mode
+	mdMOVE=	1
+	mdSURV=	2
+	mdDIR =	3
+	mdTO  =	4
+	mdPHAS=	5
+
+;ifo functions
+	fnAW=	0
+	fnSE=	1
+	fnRA=	2
+	fnMO=	3
+	fnDI=	4
+	fnFI=	5
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; For human player, return a move in R2 for piece given
+; by local variables and R3. Get and process commands.
+; Use:
+;	mov	unitnum,R3
+;	call	SETLOC
+;	call	HMOVE
+;
+; Registers: R0,R1,R4 destroyed.
+;
+
+mode:	.byte	0		;current mode that we're in
+oldmod:	.byte	0		;mode last printed by MODPRT
+curloc:	.blkw	1		;current location
+
+HMOVE:	mov	#-1,R2		;default no move
+	call	SURSEA		;A on T surrounded by sea?
+	bcs	done		;yes
+	call	MYCODE		;see if automatic move
+	bcs	movmod		;no
+
+done:	clrb	mode		;no mode
+	jmp	MODPRT		;print it/return
+
+;enter movement mode
+movmod:	movb	#mdMOVE,mode	;in mode MOVE
+	call	RESLOC		;make sure it's up to date for HEADNG
+	call	HEADNG		;unit heading
+	mov	LOC(R5),R0	;unit location
+	jsr	R5,INSECT	;in current sector?
+	.word	2		;with border of 2
+	bcc	1$		;yes
+	call	CENTER		;readjust sector
+1$:	mov	R0,curloc	;set current location
+	br	cmdscn
+
+;Command Scanner
+.macro	Y			;table generator
+	x	ESC,movmod	;back to MOVE mode
+	x	SPC,staput	;stay put
+	x	'R,cmdR		;random
+	x	'S,cmdS		;sentry
+	x	'I,cmdI		;direction
+	x	'V,cmdV		;save game
+	x	'G,cmdG		;fill
+	x	'F,cmdF		;from
+	x	'T,cmdT		;to
+	x	'P,cmdP		;prod phase
+	x	'N,cmdN		;new screen
+	x	'K,cmdK		;wake up
+	x	'U,cmdU		;wake up units aboard
+	x	'H,cmdH		;20 free moves to enemy
+	x	'Y,cmdY		;enter survey mode
+	  .if	eq,debug
+	x	'1,cmd1		;list computer variables
+	x	'2,cmd2		;show computer map
+	  .endc
+.endm
+
+.macro	x	commnd,proces
+	.byte	commnd
+.endm
+
+CMDTAB:	Y			;commnd table
+	Ntab=	.-CMDTAB	;# of entries
+	.even
+
+.macro	x	commnd,proces
+	.word	proces
+.endm
+
+SUBTAB:	Y			;process table
+
+cmderr:	call	BELL		;bad command
+	call	VALCMD		;type valid commands
+cmdscn:	call	MODPRT
+	movb	MAPN(R5),MAPNUM	;player map
+	mov	LOC(R5),R0	;loc for sensor
+	call	SENSOR		;make sure map is up to date
+	mov	CURLOC,R0	;for pcur24
+	call	pcur24		;position cursor
+	call	TTinr		;get command
+	mov	R0,R1		;put it in R1
+	mov	curloc,R0	;get location
+	movb	MAPN(R5),MAPNUM	;player map
+	call	CMDCUR		;direction command?
+	bcc	scn		;no
+	if	R0 eq CURLOC, cmderr	;if bad direction command
+	ifb	mode eq #mdSURV, 1$	;if in survey mode
+	ifb	mode ne #mdTO, done	;if not in TO mode
+
+;in TO mode, can't proceed beyond maxrng from frmloc
+	mov	R0,R2		;save R0
+	mov	frmloc,R1	;from location
+	call	DIST		;find dist from R0 to frmloc
+	ifb	R0 hi maxrng, cmderr	;if dist>maxrng
+	mov	R2,R0		;restore R0
+1$:	mov	R0,CURLOC	;update current location
+	call	typhdg		;type heading
+	br	cmdscn
+
+scn:	mov	#Ntab,R0		;# of entries
+1$:	ifb	R1 eq CMDTAB-1(R0), 2$	;if command is in table
+	sob	R0,1$
+	br	cmderr
+
+2$:	asl	R0		;word
+	jmp	@SUBTAB-2(R0)	;goto processing routine
+
+;++++++++++++++++++++
+staput:	ifb	mode ne #mdMOVE,cmderr	;only in move mode
+	mov	#-1,R2		;no move
+	jmp	done
+
+cmdR:	movb	#fnRA,R4	;random move
+	jmp	MYCMOD
+
+cmdS:	movb	#fnSE,R4	;sentry
+	jmp	MYCMOD
+
+cmdH:	add	#20,ROUND(R5)	;give enemy 20 rounds free
+	movb	mode,-(SP)	;save mode
+	clrb	mode
+	call	MODPRT		;no mode
+	call	IDLE		;swap players
+	movb	(SP)+,mode	;pop mode
+	br	cmdscn
+
+	  .if	eq,debug
+cmd1:	call	LSTVAR
+	br	debfin
+
+cmd2:	mov	PLYR(R5),R4
+	movb	MAPN(R4),MAPNUM	;get enemy map #
+	call	CLRSEC		;clear sector
+	mov	CURLOC,R0
+	call	CENTER		;show enemy map
+debfin:	call	TTin
+	movb	MAPN(R5),MAPNUM
+	call	CLRSEC
+	  .endc
+
+cmdN:	mov	CURLOC,R0
+	call	CENTER		;center screen about cursor
+	br	cmdscn
+
+cmdY:	ifb	mode eq #mdSURV, cmderr	;if already in survey mode
+	movb	#mdSURV,mode	;enter survey mode
+	call	typhdg
+	br	cmdscn
+
+cmdV:	ifb	mode ne #mdMOVE, 1$	;only in move mode
+	clrb	mode
+	call	MODPRT		;no mode
+	call	SAVGAM		;save game
+	bcs	2$		;not a restored game
+	call	TTclr		;clear screen if restored game
+2$:	jmp	movmod
+1$:	jmp	cmderr
+
+cmdI:	ifb	mode eq #mdTO, 5$	;no TO mode
+	call	VALID		;unit to give function to?
+	bcs	5$		;no
+	movb	mode,-(SP)	;push mode
+	movb	#mdDIR,mode	;enter DIR mode
+	call	MODPRT
+	mov	CURLOC,R0	;get current location
+	call	PCUR24		;position cursor
+3$:	call	TTin		;get dir
+	ifb	R0 eq #ESC, 1$	;if escape
+	mov	R0,R1		;set up arg for CMDCUR
+	mov	CURLOC,R0	;get current location
+	call	CMDCUR		;direction command?
+	bcs	2$		;yes
+4$:	call	BELL		;error
+	call	VALCMD		;list valid commands
+	br	3$
+
+2$:	if	R0 eq CURLOC, 4$	;if bad direction command
+	movb	#fnDI,R4	;DIR function
+	movb	(SP)+,mode	;pop mode
+	call	MODPRT
+	jmp	MYCMOD
+
+1$:	movb	(SP)+,mode	;pop mode
+	jmp	cmdscn
+
+5$:	jmp	cmderr
+
+;+++++++++++++++++++++++
+cmdG:	call	VALID		;valid unit?
+	bcs	3$		;no
+	if	R0 ne LOC(R5), 1$	;if not same as R3 piece
+	movb	TYPE(R5),R1	;get unit type
+	br	2$
+
+1$:	movb	TYP(R1),R1	;get unit type
+2$:	call	TCAF		;T or a C?
+	bcs	3$		;no
+	movb	#fnFI,R4	;fill IFO
+	jmp	MYCMOD		;yes
+
+3$:	jmp	cmderr
+
+;++++++++++++++++++++++
+;variables for FROM-TO
+savmod:	.blkb	1	;place to save old mode
+citnum:	.blkb	1	;  "   "   "   city #
+maxrng:	.blkb	1	;max dist from frmloc you can go
+	.even
+frmloc:	.blkw	1	;where FROM is from
+
+cmdF:	ifb	mode eq #mdTO, cerr3	;if already in TO mode
+	movb	#100,maxrng	;default (unlimited)
+	movb	#-1,citnum	;default
+	call	VALID		;a unit?
+	bcs	2$		;no
+	if	R0 ne LOC(R5), 3$	;if not R3 unit
+
+; if mode=mdSURV then
+;	if TYP(R1)=city goto 2$
+;	if (TYPE(R5)=F) and (TYP(R1)=C) goto 1$
+	ifb	mode ne #mdSURV, 4$
+	ifb	TYP(R1) eq #-2, 2$	;if a city
+	ifb	TYPE(R5) ne #F, 4$
+	ifb	TYP(R1) eq #C, 1$
+4$:
+;if TYPE(R5)=F then maxrng=HITS; goto 1$
+	ifb	TYPE(R5) ne #F, 1$	;if not an F
+	movb	HITS(R5),maxrng		;set max range
+	br	1$
+
+3$:	ifb	TYP(R1) ne #F, 1$	;if not an F
+	push	R3
+	call	FNDUNI		;find # of airplane
+	movb	UNIT1(R3),R1
+	bic	#^O177700,R1	;get fuel remaining
+	movb	R1,maxrng	;store in maxrng
+	pop	R3
+	br	1$
+
+2$:	call	CITTST		;test for city
+	movb	HITTAB+1,maxrng	;set max range to F max range
+	push	R3		;save unit #
+	call	FNDCIT		;get city #
+	movb	R3,citnum	;save it
+	pop	R3
+1$:	movb	mode,savmod	;save mode
+	movb	#mdTO,mode	;change mode
+	call	MODPRT
+	mov	R0,frmloc	;save where we're coming from
+cscn2:	jmp	cmdscn
+cerr3:	jmp	cmderr
+
+cmdT:	ifb	mode ne #mdTO, cerr3	;error if not in TO mode
+	movb	savmod,mode	;back to old mode
+	call	MODPRT
+	mov	CURLOC,R2	;ila
+	movb	#fnMO,R4	;ifo
+	mov	frmloc,CURLOC	;put cursor back
+	movb	citnum,R1	;was it a city?
+	bmi	MYCMOD		;no
+	asl	R1		;word
+	add	R5,R1
+	mov	R2,FIPATH(R1)	;set FIPATH
+	call	typhdg		;type new heading for city
+	jmp	cmdscn
+
+cmdK:	call	VALID		;valid unit?
+	bcc	1$		;yes
+	call	cittst		;city test
+	push	R3
+	call	FNDCIT		;find the city
+	asl	R3
+	add	R5,R3
+	clr	FIPATH(R3)	;reset fipath
+	pop	R3
+	call	typhdg
+	jmp	cmdscn
+
+1$:	clr	R4		;wake unit up
+	br	MYCMOD
+
+cmdU:	call	VALID
+	bcc	1$
+	call	CITTST
+	mov	#UNILOC+<UNIMAX*2>,R2	;loc index
+	mov	#UNIMAX,R1		;unit index
+3$:	if	R0 ne -(R2), 2$		;if locs don't match
+	bicb	#^O370,UNIT2-1(R1)	;clear ifo
+	if	LOC(R5) ne (R2), 2$	;if not our unit
+	clrb	IFO(R5)			;reset local var
+2$:	sob	R1,3$
+	br	cscn2
+
+1$:	movb	TYP(R1),R1		;get unit type
+	call	TCAF			;T or C?
+	bcs	cerr2			;no
+	mov	#UNILOC+<UNIMAX*2>,R2	;loc index
+	mov	#UNIMAX,R1		;unit index
+4$:	if	R0 ne -(R2), 5$
+	movb	UNIT2-1(R1),R4
+	bic	#^O177770,R4		;get unit type
+	ifb	R4 hi #F, 5$		;if not A or F
+	bicb	#^O370,UNIT2-1(R1)	;clear ifo
+	if	LOC(R5) ne (R2), 5$	;if not same as our unit
+	clrb	IFO(R5)			;clear local var
+5$:	sob	R1,4$
+	br	cscn2
+
+cmdP:	call	VALID			;set up R0 and R1
+	ifb	mode ne #mdSURV, cerr2	;error if not in survey mode
+	call	CITTST			;test for city
+	movb	#mdPHAS,mode	;new mode
+	call	MODPRT
+	push	R3
+	call	FNDCIT		;find city
+	call	PHASIN		;get new phase
+	pop	R3
+	movb	#mdSURV,mode	;back to survey mode
+	jmp	CMDSCN
+
+;;;;;;;;;;;;;;;;;;
+; Given map value in R1, if it is an owned city return else
+; pop ret addr and goto cmderr.
+
+CITTST:	ifb	TYP(R1) ne #-2, 1$		;if not a city
+	ifb	OWN(R1) ne PLYNUM(R5), 1$	;if unowned city
+	rts	PC
+
+1$:	tst	(SP)+		;pop ret addr
+cerr2:	jmp	cmderr
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given IFO in R4, and ILA in R2, modify the mycode of the unit
+; that the cursor is on top of. Jumps to
+;	HMOVE:	If we changed mycode of R3 unit.
+;	cmdscn:	If we changed mycode of another unit.
+;	cmderr:	If bad command.
+; Use:
+;	jmp	MYCMOD
+;
+; R0,R1,R2,R4 destroyed.
+;
+
+MYCMOD:	call	VALID		;valid unit?
+	bcs	cerr2		;no
+	if	R0 ne LOC(R5), 1$	;if not R3 unit
+
+;if mode=mdSURV then
+;	if (TYPE(R5)=A) and (TYP(R1)=T) goto 1$
+;	if (TYPE(R5)=F) and (TYP(R1)=C) goto 1$
+	ifb	mode ne #mdSURV, 2$
+	ifb	TYPE(R5) hi #F, 2$	;if not A or F
+	ifb	TYP(R1) eq #T, 1$	;can't be F on T or A on C
+	ifb	TYP(R1) eq #C, 1$
+
+2$:	movb	R4,IFO(R5)	;change IFO
+	mov	R2,ILA(R5)	;change ILA
+	call	RESLOC		;so HEADNG will work
+	call	HEADNG		;type new heading
+	jmp	HMOVE
+
+1$:	push	R3
+	call	FNDUNI		;find the unit
+	bicb	#^O370,UNIT2(R3)	;clear IFO of unit
+	asl	R4
+	asl	R4
+	asl	R4
+	bisb	R4,UNIT2(R3)	;set new IFO
+	asl	R3
+	mov	R2,UNIILA(R3)	;set new ILA
+	asr	R3
+	call	HEADNG		;new heading
+	pop	R3
+	jmp	cmdscn
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; VALID
+; Purpose: Call with CURLOC and local variables.
+; Returns: R0=CURLOC
+;	   R1=MAP(ref,CURLOC)
+;	   C=0 if (CURLOC=LOC) or ((MAP(ref,CURLOC)=unit) and (unit is owned))
+; Use:
+;	call	VALID
+;
+
+VALID:	mov	CURLOC,R0	;get cursor location
+	clrb	MAPNUM		;ref map
+	call	MAP		;get map val
+	if	R0 eq LOC(R5), 1$		;if CURLOC=LOC
+	ifb	OWN(R1) ne PLYNUM(R5), 3$	;if enemy unit
+	tstb	TYP(R1)		;is it a unit?
+	bpl	1$		;yes, C=0
+3$:	sec
+1$:	rts	PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Print out mode, if not already on screen.
+; Input:
+;	mode	=	new mode we're entering
+;	oldmod	=	previous mode
+; Output:
+;	oldmod	=	mode
+
+MODPRT:	push	R0
+	movb	mode,R0
+	ifb	R0 eq oldmod, t2	;if already on screen
+	.curs	3,0
+	clr	-(SP)		;push a 0
+	movb	s1(R0),(SP)	;offset in LSB, MSB=0
+	add	PC,(SP)		;add in offset base (PC=t1!)
+t1:	call	ADRMES		;print string
+	movb	R0,oldmod	;new oldmod
+t2:	pop	R0
+	rts	PC
+
+s1:	.byte	1$-t1,2$-t1,3$-t1,4$-t1,5$-t1,6$-t1
+
+1$:	.asciz	/      /	;no mode
+2$:	.asciz	/Move  /
+3$:	.asciz	/Survey/
+4$:	.asciz	/Dir   /
+5$:	.asciz	/To    /
+6$:	.asciz	/Phase /
+	.even
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; List valid commands for a particular mode
+; Input:
+;	mode =	current mode
+
+VALCMD:	push	R0
+	.cmes	3,20,<Valid commands: >,eol
+	movb	mode,R0		;get current mode
+	clr	-(SP)		;so msb=0
+	movb	20$(R0),(SP)	;load lsb with offset
+	add	PC,(SP)		;now (SP)=addr of string
+21$:	call	ADRMES		;print string
+	pop	R0
+	rts	PC
+
+20$:	.byte	5$-21$,1$-21$,2$-21$,3$-21$,4$-21$,5$-21$
+1$:	.asciz	/QWEADZXC,RSIVGFNKUHY,space/
+2$:	.asciz	/QWEADZXC,RSIGFPNKUH,esc/
+3$:	.asciz	/QWEADZXC,esc/
+4$:	.asciz	/QWEADZXC,T,esc/
+5$:	.asciz	/AFDTSRCB/
+	.even
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Type out data on our new location
+; Input:
+;	CURLOC =	new location
+; Output:
+;	R0 =	CURLOC
+;	C =	0
+;	R1	destroyed
+
+typhdg:	push	R3
+	mov	CURLOC,R0	;new location
+	call	MAP		;what's there?
+	ifb	OWN(R1) ne PLYNUM(R5), 2$	;if not owned
+	tstb	TYP(R1)		;is it a unit or a city?
+	bpl	1$		;not a city
+	call	FNDCIT		;get city #
+	call	TYPCIT
+	br	2$
+
+1$:	call	FNDUNI		;find unit
+	call	HEADNG		;type heading
+2$:	pop	R3
+	clc			;no errors
+	rts	PC
+
+	.end

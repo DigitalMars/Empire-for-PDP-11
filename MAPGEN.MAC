@@ -1,0 +1,343 @@
+
+; MAPGEN.MAC    23-Jun-82
+; Purpose:      Create a map.
+
+        .globl  CURMES,LOCPRT,PATH,ARROW,FNDMAP,OPT,SEAHI,SEALO
+        .globl  CMDCUR,TTclr,CURSOR,CURx,CURy,INSECT,TTcurs,BORDER
+        .globl  MAPS,MAPNUM,MAPTAB,SECTOR,PCUR2,MAPPRT,LSTBAS
+        .globl  MAP,CHAMAP,BELL,CRLF,TTout,DECIN,DECPRT,INLMES,CENTER
+        .mcall  .regdef,.csigen,.readw,.ttyout,.writw,.exit,.close,.wait
+        .mcall  .ttyin
+        .regdef
+        .radix  10
+
+.macro  push    arg
+        mov     arg,-(SP)
+.endm
+
+.macro  pop     arg
+        mov     (SP)+,arg
+.endm
+
+        CR      = 13            ;carriage return
+        LF      = 10            ;line feed
+        TAB     = 9             ;horizontal tab
+        ESC     = 27            ;escape
+        FF      = 12            ;form feed
+        SPACE   = 32
+        BCKSPC  = 8             ;backspace
+
+        errwrd  = ^O52          ;error word address
+        jsw     = ^O44          ;job status word
+
+loc:    .word   0               ;map location
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; MAPGEN main program
+
+MAPGEN:
+        mov     #59*256,BORDER+12
+        mov     #99*256,BORDER+22       ;border is now off the edge
+        jsr     PC,setup        ;get command string, open files
+        clr     loc             ;start with location 0
+        clrb    MAPNUM          ;work with map 0
+        .wait   #3              ;see if we have an input file
+        bcs     inimap          ;nope, init map
+        jsr     PC,INMAP        ;input map
+        br      mapset          ;map is set up
+
+inimap: mov     #MAPS+4000,R1   ;# of bytes in a map
+        mov     #^B100001000010,R0      ;3 dots
+1$:     mov     R0,-(R1)        ;init map
+        cmp     R1,#MAPS
+        bne     1$
+
+mapset: jsr     PC,TTclr        ;clear screen, reset CURSOR
+        mov     #30*256+50,R0   ;screen center
+        jsr     PC,CENTER       ;type sector
+        mov     R0,loc          ;remember new loc
+        bis     #^O10000,@#jsw  ;special tty input mode
+        br      cmdscn          ;goto command scanner
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CMDSCN
+; Purpose:      Get and process commands
+
+.macro  Y       ;table generator
+        x       '+,MAPMOD
+        x       '.,MAPMOD
+        x       '*,MAPMOD
+        x       'F,FROM
+        x       'T,TO
+        x       'N,VERIFY
+        x       'L,LSTMOD
+        x       SPACE,MAPMOD
+        x       'V,OUTMAP
+.endm
+
+.macro  x       A,B
+        .byte   A
+.endm
+
+CMDTAB: Y               ;command table
+Ntab=   .-CMDTAB        ;# of entries
+        .even
+
+.macro  x       A,B
+        .word   B
+.endm
+
+SUBTAB: Y               ;processing routines
+
+CMDSCN: .ttyin                  ;get command
+        mov     R0,R1
+        mov     loc,R0          ;args for CMDCUR
+        jsr     PC,CMDCUR       ;do cursor movement
+        bcc     notcur          ;not cursor command
+        cmp     loc,R0          ;see if we moved cursor
+        beq     cmderr          ;no
+        mov     R0,loc          ;store new loc
+        br      cmdscn          ;next command
+
+cmderr: jsr     PC,BELL         ;get mad
+        br      cmdscn
+
+notcur: mov     #Ntab,R0        ;# entries
+1$:     cmpb    CMDTAB-1(R0),R1 ;is R1 in CMDTAB?
+        beq     gotcmd          ;yes
+        sob     R0,1$           ;loop
+        br      cmderr          ;illegal command
+
+gotcmd: asl     R0              ;convert to index into SUBTAB
+        jsr     PC,@SUBTAB-2(R0)        ;call processing routine
+        br      cmdscn
+
+;;;;;;;;;;;;;
+;
+LSTMOD:
+        mov     #-1,LSTBAS      ;new screen
+        jmp     TTclr           ;clear screen
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; VERIFY
+; Purpose:      Center screen about loc.
+; Use:
+;       call    VERIFY
+;
+; Registers: R0 destroyed
+;
+
+VERIFY: mov     loc,R0
+        jmp     CENTER
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FROM
+; Purpose:      Mark spot where we're coming from.
+; Use:
+;       jsr     PC,FROM
+;
+; Registers: R0 destroyed
+
+FROM:   mov     #'F,R0
+        jsr     PC,TTout
+        jsr     R1,CURMES
+        .byte   0,40
+        .asciz  /From:/
+        .even
+        mov     LOC,R0          ;get loc
+        mov     LOC,savbeg      ;save for TO
+        jsr     PC,LOCPRT       ;type it
+        jsr     PC,pcur2-4      ;put cursor back
+        rts     PC
+
+savbeg: .blkw   1
+
+;------------------------------
+; TO
+; Purpose:      Calculate a path from savbeg to LOC.
+; Use:
+;       jsr     PC,TO
+;
+; Registers: R0-R4 destroyed
+
+TO:     mov     #'T,R0
+        jsr     PC,TTout
+        jsr     R1,CURMES
+        .byte   1,40
+        .asciz  /To:  /
+        .even
+        mov     LOC,R0          ;get location
+        jsr     PC,LOCPRT       ;print it
+        mov     R0,R1           ;set up end
+        mov     savbeg,R0       ;set up beg
+        movb    #-1,OPT         ;optimize path
+2$:     jsr     R5,PATH         ;find a path
+        .word   SEAHI,SEALO     ;sea
+        .word   1               ;move dir
+        bcs     1$              ;failure
+        jsr     PC,ARROW        ;move to new spot
+        jsr     PC,pcur2-4
+        push    R0              ;save new spot
+        mov     #'G,R0
+        jsr     PC,TTout
+        pop     R0
+        cmp     R0,LOC          ;see if we've arrived
+        bne     2$
+1$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; MAPMOD
+; Purpose:      Modify the map loc to agree with the char typed.
+; Use:
+;       mov     char,R1         ;character typed
+;       mov     val,loc         ;map location
+;       jsr     PC,MAPMOD
+; Results: loc is incremented (column), R0,R1,R3 destroyed.
+
+MAPMOD: mov     R1,R0           ;command
+        jsr     PC,FNDMAP       ;find map code in R1
+        bcs     error           ;not in MAPTAB!
+        mov     loc,R0          ;location to change
+        jsr     PC,CHAMAP       ;change map
+        push    R0              ;save loc
+        movb    MAPTAB(R1),R0   ;get map char
+        jsr     PC,TTout        ;print contents of map on screen
+        pop     R0              ;restore loc
+        inc     R0              ;next column
+        jsr     R5,INSECT       ;in sector?
+        .word   2               ;border of 2
+        bcc     1$              ;yes
+        movb    #BCKSPC,R0
+        .TTYOUT                 ;backup cursor
+        dec     CURx            ;reflect this
+        rts     PC              ;no change in loc
+1$:     inc     loc             ;next column
+        rts     PC
+
+error:  jsr     R1,INLMES
+        .asciz  /Error MAPMOD/
+        .even
+        jsr     PC,CRLF
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; SETUP
+; Purpose: Get command string from terminal. Open input and output files.
+;          Set up stuff so nxtchr will work properly.
+; Use:
+;       jsr     PC,setup
+;
+; Registers: preserved
+
+setup:  push    R0
+        .csigen #dspace,#dext   ;get string from terminal
+        tst     (SP)+           ;pop junk off stack
+        mov     R0,buff         ;R0 has first free location
+        mov     R0,bufpnt       ;pointer to start of buffer
+        clr     bcount          ;# of bytes left in buffer
+        pop     R0
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; INMAP
+; Purpose: Read in map 0 from channel 3
+; Use:
+;       jsr     PC,INMAP
+; R0,R1,R2,R5 destroyed.
+
+INMAP:  mov     #MAPS,R1        ;map data
+        clr     inblk           ;input block number
+        mov     #list,R5        ;EMT argument list
+read:   .readw  R5,#3,buff,#256,inblk   ;read channel 3
+        bcc     noerr           ;if no error
+        tstb    @#errwrd        ;what kind of error?
+        beq     eof             ;eof error
+        jsr     R1,INLMES
+        .ascii  /Input Error/
+        .byte   CR,LF,0
+        .even
+        .exit
+
+eof:    jsr     R1,INLMES
+        .ascii  /EOF/
+        .byte   CR,LF,0
+        .even
+        .exit
+
+noerr:  mov     buff,R2         ;buffer pointer
+1$:     mov     (R2)+,(R1)+     ;move from buffer to map
+        cmp     #MAPS+4000,R1   ;see if done
+        beq     done            ;yes
+        sob     R0,1$           ;buffer word count
+        inc     inblk           ;next block
+        br      read            ;read next block
+
+done:   rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; OUTMAP
+; Purpose: Output the 2000 word packed map to the output file.
+; Use:
+;       jsr     PC,outmap
+;
+; Registers: R0,R1,R2,R3,R4,R5 destroyed
+;
+
+T1:     dec     R3              ;buffer word count
+        beq     T3              ;until buffer is full
+        clr     (R4)+           ;pack with 0
+        br      T1
+
+outmap: clr     outblk          ;output block number
+        mov     #MAPS,R1        ;addr of packed map
+        mov     #2000,R2        ;number of words in map
+
+T4:     mov     #256,R3         ;# of words in buffer
+        mov     buff,R4         ;buffer pointer
+T2:     mov     (R1)+,(R4)+     ;transfer word from map to buffer
+        dec     R2              ;word count
+        beq     T1              ;if no words in map left
+        sob     R3,T2           ;loop till buffer is full
+
+T3:     mov     #list,R5        ;EMT argument list
+        .writw  R5,#0,buff,#256,outblk  ;write to channel 0
+        bcc     nerr            ;no error
+        jsr     R1,TTcurs
+        .byte   23,0
+        jsr     R1,INLMES
+        .byte   CR,LF
+        .ascii  /Output Error/
+        .byte   CR,LF,0
+        .even
+        .exit
+
+nerr:   inc     outblk          ;next output block
+        tst     R2              ;see if we're done
+        bne     T4              ;nope
+        .close  #0
+        jsr     R1,TTcurs
+        .byte   23,0
+        jsr     PC,CRLF
+        .exit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; data
+
+dext:   .rad50  "MAP"           ;input files
+        .rad50  "MAP"           ;output file
+        .word   0,0             ;not needed
+bcount: .word   0               ;byte count
+buff:   .word   0               ;I/O buffer start
+bufpnt: .word   0               ;I/O buffer pointer
+inblk:  .word   0               ;relative block to read
+outblk: .word   0               ;relative block to write
+list:   .blkw   5               ;EMT argument list
+dspace: .blkw   2000            ;handler space
+
+        .end    MAPGEN
+
+
+
+.

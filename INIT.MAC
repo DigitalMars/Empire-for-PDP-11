@@ -1,0 +1,613 @@
+
+; INIT.MAC      21-Jul-83
+; Purpose:      Initialize variables.
+; Globals defined:
+        .globl  SETUP,RESGAM,SAVGAM,DSPACE
+
+        .globl  PATH,ARROW,SEEDHI,SEEDLO,PLYR,RANDOM,PLYTYP,ADRMES
+        .globl  MAPS,MAPNUM,MAPTAB,FNDMAP,SECTOR,MAPPRT,CITMAX,CITLOC
+        .globl  MAP,CHAMAP,BELL,TTout,CENTER,EDGER,SPACE,BCKSPC,TTtab
+        .globl  CITOWN,PLYNUM,CITPHS,CITFND,SENSOR,PHASIN,TEST,TTclr
+        .globl  INIT,DELAY,TTin,TTtbln,OPEN,READ,WRITE,EMPVER,SAVSP
+        .globl  WCLOSE,SAVBEG,SAVEND,TAMPER
+        .mcall  .gtim,.ttinr,.ttyin
+        .mcall  .ttyout,.exit,.close,.wait
+
+        jsw     = ^O44          ;job status word
+
+;;;;;;;;;;;;;;;;;;;;;;
+; Initialize the game, either from a saved game or set up a new one.
+;
+; Registers: R5 and SP are initialized, R0-R4 destroyed.
+;
+
+SETUP:
+        call    TMPSUB          ;temporary subroutine
+        bcs     RESGAM          ;restore old game
+        call    inmap           ;read in the map
+        call    citini          ;init city variables
+        call    TTclr           ;clear screen
+
+;select a city for each player
+        call    citsel          ;select a city for plyr2
+        mov     PLYR(R5),R5     ;switch players
+        call    citsel          ;plyr1
+        mov     PLYR(R5),R5     ;back to plyr2
+        rts     PC              ;start playing
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Restart old game. Return to routine that called SAVGAM.
+RESGAM:
+ mov     #DSPACE+<2000*2>,SP     ;temporary stack
+        jsr     R1,OPEN         ;open EMPIRE.DAT
+        .word   .               ;garbage default extensions
+        .word   2$              ;filename
+        bcs     7$              ;error
+        mov     #SAVBEG,R1      ;start of variables
+        mov     #<SAVEND-SAVBEG>/2,R2   ;# of words to read
+1$:     jsr     R1,READ         ;read word
+        .word   3               ;channel 3
+        bcc     6$              ;no error
+7$:     .imes   <Read error on EMPIRE.DAT>
+        .exit
+
+6$:     mov     R0,(R1)+        ;restore word
+        sob     R2,1$
+        if      SAVEND-2 ne #SAVEND-SAVBEG, 4$  ;check file length
+        if      EMPVER eq #VERSIO, 3$           ;check version #
+4$:     .imes   <Bad EMPIRE.DAT file.>,eolc
+        .exit
+
+3$:     .close  #3              ;close I/O channel
+        mov     SAVSP,SP        ;restore SP
+        clc                     ;flag for caller
+        rts     PC              ;return to game
+
+2$:     .asciz  /EMPIRE.DAT/
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Save a game in EMPIRE.DAT
+
+SAVGAM: .savacs
+        .cmes   3,20,<Working.. >,eol
+        mov     SP,SAVSP        ;save SP
+        jsr     R1,OPEN         ;open data file
+        .word   .               ;garbage default ext
+        .word   2$              ;filenm
+        bcs     5$              ;error
+        mov     #SAVBEG,R1      ;save start
+        mov     #<SAVEND-SAVBEG>/2,R2   ;# of words to save
+1$:     mov     (R1)+,R0        ;get word
+        jsr     R1,WRITE        ;write it
+        .word   0               ;channel 0
+        bcs     5$              ;error
+        sob     R2,1$
+        jsr     R1,WCLOSE       ;output last block & close
+        .word   0               ;channel 0
+        bcc     7$              ;no error
+5$:     .imes   <EMPIRE.DAT output failure.>
+        br      6$
+
+7$:     .imes   <Game saved.>
+6$:     sec                     ;flag not restored game
+        rts     PC
+
+2$:     .asciz  /EMPIRE.DAT=/
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Select a city for a player, init it
+; R0-R4 destroyed
+
+citsel: clrb    MAPNUM          ;ref map
+        mov     #CITMAX,R0      ;# of cities
+        call    RANDOM          ;get # from 0 to CITMAX-1
+        mov     R0,R4
+        asl     R4              ;word offset
+        mov     CITLOC(R4),R0   ;get city location
+        beq     citsel          ;invalid city
+        call    EDGER           ;check around for water
+        ifb     R0 eq #8, citsel        ;if island city
+        mov     CITLOC(R4),R0
+        asr     R4              ;back to city #
+        tstb    CITOWN(R4)      ;unowned city?
+        bne     citsel          ;no
+        movb    PLYNUM(R5),CITOWN(R4)   ;claim ownership
+        movb    PLYNUM(R5),R1   ;get player number
+        movb    2$-1(R1),R1     ;get city
+        call    CHAMAP          ;change ref map
+        call    SENSOR          ;do a sensor probe
+        tstb    PLYTYP(R5)      ;see if computer player
+        bne     3$              ;no
+        movb    #1,CITPHS(R4)   ;produce fighters
+        asl     R4              ;word offset
+        mov     #5,CITFND(R4)   ;completion date
+        rts     PC
+
+3$:     movb    #-1,CITPHS(R4)  ;indicate no phase
+        mov     R4,R3           ;put city index in R3
+        jmp     PHASIN          ;get city phase
+
+2$:     .byte   5,4             ;'X and 'O respectively
+
+
+;***************************
+; Initialize CITLOC,CITOWN
+; Registers: R0-R4 destroyed.
+;
+
+citini: mov     #CITMAX,R0      ;max # of cities
+        mov     #CITLOC,R1      ;city locations
+        mov     #CITOWN,R2      ;city owner
+1$:     clr     (R1)+
+        clrb    (R2)+           ;0 means unowned city
+        sob     R0,1$
+
+        mov     #CITLOC,R2      ;pointer
+        clrb    MAPNUM          ;look at map 0
+        clr     R3              ;row #
+4$:     clr     R4              ;col #
+3$:     mov     R3,R0
+        swab    R0
+        bis     R4,R0           ;put loc in R0
+        call    MAP             ;see what's there
+        ifb     MAPTAB(R1) ne #'*, 2$   ;if not a city
+        mov     R0,(R2)+        ;store in CITLOC
+2$:     inc     R4              ;next col
+        ifb     R4 los #Mcolmx, 3$      ;if not ready for next row
+        inc     R3                      ;next row
+        ifb     R3 los #Mrowmx, 4$      ;if not done
+
+        sub     #CITLOC,R2
+        asr     R2              ;get # of cities
+        mov     R2,R0
+        call    DECPRT          ;type #
+        .imes   < cities.>,eolc
+        jsr     R5,DELAY
+        .word   2
+        if      R0 los #CITMAX, 5$
+        .imes   <CITINI>,eolc
+        halt
+
+5$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Read in map 0 from map file, init maps 1 & 2
+; R0,R1,R2 destroyed.
+
+INMAP:  mov     #MAPS,R1        ;map pointer
+        mov     #2000,R2        ;words in map
+        jsr     R1,OPEN         ;open map file
+        .word   dext
+        .word   cstrng
+        bcs     4$              ;error
+1$:     jsr     R1,READ         ;read word
+        .word   3               ;channel 3
+        bcc     2$              ;no errors
+4$:     .imes   <Input error on .MAP file>,eolc
+        .exit
+
+2$:     mov     R0,(R1)+        ;put in map
+        sob     R2,1$
+
+; clear other 2 maps
+        mov     #2000+3000,R2   ;2K & 3K for other 2 maps
+3$:     clr     (R1)+           ;set to blank
+        sob     R2,3$
+        rts     PC
+
+cstrng: .asciz  /A.MAP/
+dext:   .rad50  "MAP"           ;input files
+        .rad50  "MAP"           ;output file
+        .word   0,0             ;not needed
+
+DSPACE:                         ;handler space
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Here go some initialization routines. These will be wiped out
+; when a file operation is performed, as they occupy the same space
+; as the handler buffer.
+
+.macro  .LINEDT buffer,chrcnt,flag
+         jsr    R1,LINEDT
+         .word  buffer
+          .if   b,flag
+         .byte  0
+          .iff
+         .byte  flag
+          .endc
+         .byte  chrcnt
+.endm
+
+.macro  .OCTIN  buffer,chrcnt
+         jsr    R1,OCTIN
+         .word  buffer
+         .word  chrcnt
+.endm
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Do some initializations.
+; Return:
+;       C=0     start new game
+;       C=1     continue old game
+; R0..R4 destroyed
+; R5 initialized
+
+TMPSUB: bic     #^O040000,@#jsw ;convert lower case to upper case
+        bis     #^O010100,@#jsw ;special TT mode, inhibit TT wait
+          .if eq,debug
+        .imes   <DEBUG version>,eolc
+          .endc
+        call    CHKFNG          ;check for tampering
+CHKBEG:                         ;start of fingerprint check
+        call    INIT            ;init variables in VAR.MAC
+        .imes   <EMPIRE (tm) Version >
+        mov     #VERSIO,R0      ;version #
+        call    DECPRT
+        jsr     R1,INLMES
+        .ascii  <CR><LF>
+        .ascii  /Copyright (c) 1982, 1983 by Northwest Software/<CR><LF>
+        .ascii  /Written by Walter Bright/<CR><LF>
+        .byte   0
+        .even
+3$:     .imes   <Starting a new game? >
+        call    YESNO           ;prompt for Y or N
+        bcc     1$              ;if yes
+        rts     PC
+
+1$:     call    TCONF           ;get terminal configuration
+        mov     PLYR,R5         ;init R5
+        call    setran          ;init random numbers
+;       clr     SEEDHI
+;       clr     SEEDLO          ;for debugging
+CHKEND:                         ;end of fingerprint check
+        .imes   <Play (P) or watch (W)? >
+        movb    #'P,EDTBUF
+        .LINEDT EDTBUF,1
+        call    CRLF
+        ifb     EDTBUF eq #'P, 2$
+        clrb    plytyp(R5)      ;indicate computer player
+2$:     .imes   <Please wait 7 days for creation of world...>,eolc
+        clc                     ;start new game
+        rts     PC
+
+CHRCNT= 3
+EDTBUF: .blkb   CHRCNT          ;line editing buffer
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Terminal options
+
+TCONF:  push    #TTYSTR         ;tty option string
+        call    ADRMES          ;print string
+        movb    #'0,EDTBUF      ;default
+        .LINEDT EDTBUF,1        ;get terminal option
+        call    CRLF
+        movb    EDTBUF,R0       ;get command
+        bic     #^O177600,R0    ;grab lower 7 bits
+        ifb     R0 ne #'X, 1$   ;if not configure command
+        jmp     CONFIG          ;configure command
+
+1$:     sub     #'0,R0          ;convert to decimal
+        bcs     defaul          ;do defualt tty
+        ifb     R0 lo #TCTBn, ok        ;if in table
+defaul: clr     R0              ;default to VT52
+ok:     asl     R0              ;words
+        mov     TCTB(R0),R0     ;get addr of string
+        tstb    (R0)+           ;lower case capability?
+        bne     2$              ;yes
+        call    UPPERC          ;UC only tty
+2$:     mov     #TTtab,R2       ;destination table pointer
+        mov     #TTtbln,R1      ;length of TTtab
+1$:     movb    (R0)+,(R2)+     ;transfer to TTtab
+        sob     R1,1$
+        rts     PC
+
+TTYSTR: .ascii  /** Terminal Configuration **/<CR><LF>
+        .ascii  /0. VT52 (default)/<CR><LF>
+        .ascii  /1. ANSI Standard/<CR><LF>
+        .ascii  /2. ADDS Viewpoint/<CR><LF>
+        .ascii  /3. ADM 3A/<CR><LF>
+        .ascii  !4. Televideo 912C/920C/925!<CR><LF>
+        .ascii  /X. Configure/<CR><LF>
+        .asciz  /Option? /
+
+TCTB:   .word   $VT52,$ANSI,$VIEWP,$ADM3A,$TELEV
+TCTBn=  <.-TCTB>/2                      ;# of entries
+
+$VT52:  .byte   1
+        .byte   ESC,'K,0
+        .byte   ESC,'J,0
+        .byte   ESC,'H,ESC,'J,0 ;clear screen
+        .byte   ESC,'Y,0,32,0,32,0
+$ANSI:  .byte   1               ;lower case
+        .byte   ESC,'[,'K,0     ;erase to end of line
+        .byte   ESC,'[,'J,0     ;erase to end of page
+        .byte   ESC,'[,'2,'J,0  ;clear screen
+        .byte   ESC,'[,0        ;cursor addressing
+        .byte   -1,';,-1        ;decimal row,delimiter,decimal col
+        .byte   'H,0            ;terminating string
+$VIEWP: .byte   1,ESC,'K,0,ESC,'k,0,FF,0,ESC,'Y,0,0,0,0,0
+$ADM3A: .byte   0               ;no lower case
+        .byte   0,0,FF,0,ESC,'=,0,SPC,0,SPC,0
+$TELEV: .byte   1,ESC,'T,0,ESC,'Y,0,ESC,'+,0,ESC,'=,0,SPC,0,SPC,0
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; We'll have to get the configuration from the terminal
+; R0,R1,R3,R4 destroyed
+
+CONFIG: mov     #TTmstb,R4      ;message table
+        push    (R4)+           ;string addr
+        call    ADRMES          ;print string
+        call    YESNO           ;got it?
+        bcc     2$              ;yes
+        call    UPPERC          ;upper case only tty
+2$:     mov     #TTtab,R1       ;destination pointer
+        mov     #4,R3           ;get 4 octal strings
+1$:     if      R3 eq #3,3$     ;don't need erase page function
+        mov     #4,R0           ;max # of numbers
+        push    (R4)+           ;addr of message
+        call    ADRMES          ;print message
+        call    NOCTIN          ;read in N octal #s
+        tstb    -1(R1)          ;terminated with a null?
+        beq     4$              ;yes
+3$:     clrb    (R1)+           ;terminate with a null
+4$:     sob     R3,1$
+        push    (R4)+
+        call    ADRMES
+        mov     #1,R0           ;get 1 val
+        call    NOCTIN          ;get row offset
+        clrb    (R1)+           ;no delimiter
+        push    (R4)+
+        call    ADRMES
+        mov     #1,R0
+        call    NOCTIN          ;get col offset
+        clrb    (R1)+           ;end with null
+        rts     PC
+
+TTmstb: .word   1$,2$,3$,4$,5$,6$
+1$:     .asciz  /Do you have lower case? /
+2$:     .asciz  /Erase to end of line: /
+3$:     .asciz  /Clear screen: /
+4$:     .asciz  /Cursor addressing: /
+5$:     .asciz  /Row offset: /
+6$:     .asciz  /Column offset: /
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Read in a string of octal numbers
+; Input:
+;       R0 =    max # to read in
+;       R1 ->   destination
+; Output:
+;       R1 =    R1 + (# of numbers read)
+;       R0      destroyed
+
+NOCTIN: push    R0
+2$:     mov     #"00,EDTBUF
+        movb    #'0,EDTBUF+2    ;init EDTBUF to '000'
+        .imes   <   >
+        .LINEDT EDTBUF,3,1      ;get 3 octal chars
+        .OCTIN  EDTBUF,3        ;convert to octal
+        movb    R0,(R1)+        ;store result in output buffer
+        beq     1$              ;done
+        dec     (SP)            ;control count
+        bne     2$
+1$:     pop     R0
+        call    CRLF
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Fix it so an upper case only tty will work
+; R1,R2 destroyed
+
+UPPERC: mov     #2$,R2          ;string address
+        mov     #MAPTAB+15,R1   ;destination is LC map chars
+1$:     movb    (R2)+,(R1)+     ;move string
+        bne     1$              ;null terminator
+        rts     PC
+
+2$:     .asciz  /122345678/
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Edit a line of chars, also init random #s using .ttinr.
+; Use:
+;       .LINEDT buffer,chrcnt,flag
+; buffer ->     character buffer
+; chrcnt =      length of buffer
+; flag =        0: accept only printable chars
+;               1:   "      "  octal chars
+
+LINEDT: push    <R0,R2,R3>
+        mov     (R1)+,R2        ;get buffer pointer
+        movb    (R1)+,-(SP)     ;push flag
+        movb    (R1),R3         ;get chrcnt
+;type out buffer
+1$:     movb    (R2)+,R0        ;get char from buffer
+        .ttyout
+        sob     R3,1$
+;backspace over buffer
+        movb    (R1),R3         ;get chrcnt
+2$:     call    BCKSPC          ;back space
+        sob     R3,2$
+;accept first char
+3$:     call    RANDOM          ;init random numbers
+        .ttinr                  ;get char
+        bcs     3$              ;no chars yet
+        ifb     R0 eq #CR, retedt       ;if done
+        ifb     R0 lo #SPC, 3$  ;no control chars
+        ifb     R0 eq #DEL, 3$  ;no delete yet
+        tstb    (SP)            ;octal only?
+        beq     10$             ;no
+        ifb     R0 lo #'0, 3$   ;if not octal
+        ifb     R0 hi #'7, 3$   ;if not octal
+;set buffer to spaces
+10$:    push    R0
+        mov     #SPC,R0         ;space
+        movb    (R1),R3         ;chrcnt
+4$:     .ttyout                 ;type out space
+        sob     R3,4$           ;chrcnt times
+        movb    (R1),R3         ;chrcnt
+5$:     call    BCKSPC          ;backspace over buffer
+        movb    R0,-(R2)        ;putting spaces into buffer
+        sob     R3,5$           ;chrcnt times
+        pop     R0
+;put char into buffer
+8$:     ifb     R3 eq (R1), 6$  ;if buffer is full
+        movb    R0,(R2)+
+        .ttyout                 ;and echo it
+        inc     R3              ;# of chars in buffer
+;accept rest of chars
+6$:     .ttyin
+        ifb     R0 eq #CR, retedt       ;done if CR
+        ifb     R0 eq #BS, 9$           ;backspace same as delete
+        ifb     R0 eq #DEL, 9$          ;process rubout
+        ifb     R0 lo #SPC, 6$          ;no control chars
+        tstb    (SP)            ;octal only?
+        beq     8$              ;no
+        ifb     R0 lo #'0, 6$   ;if not octal
+        ifb     R0 hi #'7, 6$   ;if not octal
+        br      8$
+
+; process rubout
+9$:     tst     R3              ;start of buffer?
+        beq     6$              ;yes, error
+        dec     R3              ;one less error
+        movb    #SPC,-(R2)      ;reset buffer to space
+        call    BCKSPC
+        call    SPACE           ;clear space on screen
+        call    BCKSPC
+        br      6$
+
+retedt: tstb    (R1)+           ;skip over third arg
+        pop                     ;pop flag
+        pop     <R3,R2,R0>
+        rts     R1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Convert ascii string in BUFFER to octal & return in R0.
+; Scan terminates upon the first non-octal char or CHRCNT is reached.
+; Use:
+;       jsr     R1,OCTIN
+;       .word   BUFFER
+;       .word   CHRCNT
+
+OCTIN:  push    <R2,R3,R4>
+        clr     R0              ;result
+        mov     (R1)+,R2        ;R2 -> BUFFER
+        mov     (R1)+,R3        ;R3 = CHRCNT
+        beq     2$              ;done
+1$:     movb    (R2)+,R4        ;get char from BUFFER
+        bic     #^O177400,R4    ;clear msb
+        sub     #'0,R4          ;convert to decimal
+        bcs     2$              ;done
+        ifb     R4,hi,#7,2$     ;invalid octal char
+        asl     R0
+        asl     R0
+        asl     R0              ;R0=R0*8
+        bis     R4,R0           ;OR in new digit
+        sob     R3,1$
+2$:     pop     <R4,R3,R2>
+        rts     R1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Set SEEDHI and SEEDLO to arbitrary numbers for RANDOM.
+; R0 destroyed.
+
+SETRAN: mov     @#^O54,R0       ;get pointer to RMON
+        mov     ^O262(R0),R0    ;get DATE from HT-11
+        xor     R0,SEEDLO
+        .gtim   #alist,#time    ;get time
+        mov     time,R0         ;put in R0
+        xor     R0,SEEDHI
+        mov     time+2,R0       ;lo order of time
+        xor     R0,SEEDLO
+        rts     PC
+
+time:   .blkw   2               ;hi & lo order time
+alist:  .blkw   2               ;args for .gtim emt
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Prompt and get a yes/no response.
+; Output:
+;       C =     0       yes
+;       C =     1       no
+
+YESNO:  movb    #'Y,EDTBUF      ;default to 'Y'
+        .LINEDT EDTBUF,1        ;get command
+        call    CRLF
+        ifb     EDTBUF eq #'Y, 1$       ;if yes
+        sec                             ;else no
+        rts     PC
+
+1$:     clc
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; See if copyright notice has been tampered with
+; Output:
+;       TAMPER <> 0     if it has been tampered with
+;       R0,R1,R2        destroyed
+
+fngprt: .word   0               ;fingerprint check word
+                                ; (installed with PATCH)
+
+CHKFNG: mov     (SP),R1         ;R1 -> start of check
+        mov     #<CHKEND-CHKBEG>/4,R2   ;num/4 of words to check
+        clr     R0              ;init
+1$:     add     (R1)+,R0
+        swab    R0
+        bic     (R1)+,R0
+        bis     (R1)+,R0
+        sub     (R1)+,R0        ;random sequence of operations
+        sob     R2,1$
+        if      R0 eq fngprt, 2$        ;if fingerprint matches
+        tst     fngprt          ;0?
+        bne     4$              ;no, crash it
+        push    R0
+        mov     #fngprt,R0      ;get addr for patch
+        call    OCTPRT          ;print it
+        .imes   <: >
+        pop     R0
+        call    OCTPRT          ;and value for patch
+        call    CRLF
+        br      2$
+
+4$:     incb    TAMPER          ;set to <> 0
+2$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Print number in octal
+; Input:
+;       R0 =    #
+
+OCTPRT: .savacs
+        mov     R0,R1
+        clr     R0
+        call    1$              ;print ms digit
+        mov     #5,R2           ;5 more digits
+2$:     rol     R1
+        rol     R0
+        rol     R1
+        rol     R0              ;grab leftmost 3 bits
+        call    1$              ;print digit
+        sob     R2,2$
+        rts     PC
+
+1$:     rol     R1
+        rol     R0              ;put leftmost bit in R0
+        bic     #^O177770,R0    ;any garbage
+        add     #'0,R0          ;to ascii
+        jmp     TTout           ;print it
+
+
+.if     lt, <<.-dspace>/2>-2000
+        .blkw   2000-<<.-dspace>/2>     ;allow 2000 words min for handler
+.endc
+        .end
+

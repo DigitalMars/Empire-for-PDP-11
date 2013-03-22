@@ -1,0 +1,168 @@
+
+; TTY.MAC       1-Mar-83
+; Terminal Routines
+;
+; Globals defined: TTout,TTcurs,TTfunc,BELL,
+;                  TTclr
+
+        .mcall  .ttyout
+        .globl  LSTBAS,CURSOR,CURx,CURy,TTtab,SPACE,DECPRT
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; TTout
+; Purpose: Type out a character. Keep track of CURSOR. 4 cases are considered:
+;          1. CR, 2. LF, 3. NUL, 4. Printable character, 5. BS
+; Use:
+;       mov     #char,R0
+;       call    TTout
+;
+
+TTout:: .TTYOUT
+        ifb     R0 ne #CR,1$    ;if not case 1
+        clrb    CURx            ;reset column
+        br      4$
+
+1$:     ifb     R0 ne #BS, 5$   ;if not backspace
+        decb    CURx            ;column #
+        bpl     4$              ;ok
+        clrb    CURx            ;underflow
+        br      4$
+
+5$:     ifb     R0 ne #LF, 2$
+        incb    CURy            ;next row
+        ifb     CURy los #Trowmx, 4$    ;if not overflow
+        movb    #Trowmx,CURy            ;set to max rows
+        br      4$
+
+2$:     tst     R0              ;see if a null
+        beq     4$              ;yes
+        incb    CURx            ;else printing character
+        ifb     CURx los #Tcolmx, 4$    ;if not column overflow
+        movb    #Tcolmx,CURx            ;set to max columns
+4$:     rts     pc
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; TTcurs
+; Purpose: Move the cursor to the specified row and column. Rows are
+;          0 to 23, columns are 0 to 79.
+; Use:
+;       jsr     R1,TTcurs       ;R1 is linkage pointer
+;       .byte   row,column      ;arguments are stored in line
+;
+
+TTcurs::
+        push    R3
+        .TTfunc 3               ;send out prefix
+        push    R0
+        movb    (R1)+,R0        ;get row #
+        movb    R0,CURy         ;update CURSOR
+        call    10$             ;output row #
+        movb    (R3)+,R0        ;get delimiter
+        beq     2$              ;no delimiter
+        .TTYOUT
+2$:     movb    (R1)+,R0        ;get column number
+        movb    R0,CURx         ;update CURSOR
+        call    10$             ;output column #
+1$:     movb    (R3)+,R0        ;get terminating string
+        beq     4$              ;done
+        .TTYOUT
+        br      1$
+
+4$:     pop     R0
+        pop     R3
+        rts     R1
+
+10$:    clr     -(SP)           ;push a 0
+        movb    (R3)+,(SP)      ;get row offset
+        bpl     3$              ;output in binary
+        mov     CURSOR,(SP)     ;save CURSOR so DECPRT won't trash it
+        inc     R0              ;starts with 1, not 0
+        call    DECPRT          ;output in decimal
+        pop     CURSOR          ;restore cursor
+        rts     PC
+
+3$:     add     (SP)+,R0        ;add in offset
+        .TTYOUT
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Perform a special function on the terminal.
+; Search thru TTtab for the nth string (terminated by a null byte) and
+; send that string to the terminal.
+; Use:
+;       .TTfunc n       ;n is the function #
+;                       ;caller must update CURSOR as req'd
+; Output:
+;       if n=3 then
+;               R3 ->   row offset, col offset, terminating string
+
+TTfunc::
+        push    <R0,R2,R3>
+        mov     #TTtab,R3       ;R3 -> string table
+        mov     (R1),R2         ;R2 = n
+        beq     4$              ;do first string
+
+2$:     tstb    (R3)+           ;end of string yet?
+        bne     2$              ;no
+        sob     R2,2$           ;find nth string
+
+5$:     movb    (R3)+,R0        ;get byte of string
+        beq     3$              ;done
+        .TTYOUT
+        br      5$
+
+4$:     tstb    (R3)            ;is there an eol string?
+        bne     5$              ;yes
+        call    SIMEOL          ;simulate EOL
+
+3$:     if      (R1)+ ne #3, 6$ ;if not cursor addressing
+        mov     R3,(SP)         ;don't restore R3
+6$:     pop     <R3,R2,R0>
+        rts     R1
+
+; .TTfunc function numbers:
+; 0     erase from cursor (including cursor) to end of line
+; 1       "    "     "          "       "     "  "  "  page
+; 2     clear screen
+; 3     string for cursor addressing (must be last one)
+;       = header string,0,row offset,delim,col offset,terminating string,0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Simulate EOL function using spaces.
+SIMEOL: push    R0
+        mov     CURSOR,R0       ;get current cursor position
+        swab    R0              ;set for TTcurs
+        mov     R0,2$           ;arg for TTcurs
+        clrb    R0              ;clear row
+        swab    R0              ;R0 = col (CURx)
+        neg     R0
+        add     #Tcolmx-1,R0    ;R0=Tcolmx-1-CURx (only go to col 78)
+        beq     3$              ;done
+        bmi     3$              ;just in case
+1$:     call    SPACE           ;do R0 spaces
+        sob     R0,1$
+        jsr     R1,TTcurs
+2$:     .blkw   1
+3$:     pop     R0
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Ring the bell!
+
+BELL::  push    R0
+        mov     #BEL,R0
+        .TTYOUT
+        pop     R0
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Clear the screen.
+
+TTclr:: mov     #-1,LSTBAS      ;indicate to SECTOR that the screen is clear
+        clr     CURSOR          ;update cursor position
+        .TTfunc 2               ;clear screen
+        rts     PC
+
+        .end
+

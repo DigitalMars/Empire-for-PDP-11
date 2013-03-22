@@ -1,0 +1,206 @@
+
+; ARMYmv.MAC    16-Nov-82
+; Globals defined: ARMYif,ARMYco
+        .globl  AB,TYP,IFO,ILA,SURSEA,EXPLOR,RANDIR,ENEATT,AROUND,OPT,MAPN
+        .globl  MAPNUM,CITMAX,RANDOM,TARGET,CITLOC,LOC,DIST,PATH,LOCI
+        .globl  CHKOWN,CITLTR,PATBLK,ROUND,LOCMAX
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ARMYif
+; Purpose: Select a new ifo and ila for an army.
+; Use:
+;       call    ARMYif
+;
+; R0,R1,R2,R4 destroyed
+;
+
+ARMYif::
+        movb    AB(R5),R1
+        ifb     #T ne TYP(R1) notabd    ;if not aboard a T
+        movb    #17,IFO(R5)     ;set ifo to indicate we're aboard
+        call    SURSEA          ;surrounded by sea?
+        bcs     ret             ;yes
+        call    ARMTAR          ;cities to attack?
+        bcs     ret             ;yes
+        clr     R2              ;for EXPLOR
+        call    EXPLOR          ;territory to explore?
+        bcc     ret             ;no
+set16:  movb    #16,IFO(R5)     ;follow shore
+        mov     R2,ILA(R5)      ;set direction
+ret:    rts     PC
+
+notabd: mov     ROUND(R5),R0
+        xor     R3,R0           ;get arbitrary but predictable #
+        bit     #1,R0
+        bne     1$              ;don't call ARMTAR every time
+        call    ARMTAR          ;cities to attack?
+        bcs     ret             ;yes
+1$:     call    ARMLOC          ;LOCI to attack?
+        bcs     ret             ;yes
+        call    ARMTT           ;TTs to get aboard?
+        bcs     ret             ;yes
+        ifb     #16 eq IFO(R5), ret     ;if already following shore
+        call    RANDIR          ;select random direction
+        br      set16
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ARMYco
+; Purpose: Given trial move in R2, correct that move.
+; Use:
+;       mov     trialmove,R2
+;       call    ARMYco
+;
+; R0,R1,R4 destroyed, R2 returns with proper move.
+;
+
+ARMYco::
+        call    CITLTR          ;unowned cities?
+        bcs     ret             ;yes
+
+        call    EXPLOR          ;anything to explore?
+        bcs     ret             ;yes
+
+        movb    AB(R5),R1
+        ifb     TYP(R1) ne #T, 1$       ;if not aboard a T
+
+        jsr     R4,ENEATT       ;enemies to attack?
+        .byte   ^B11000000,0    ;attack As and Fs
+        bcs     ret             ;yes
+        br      2$
+
+1$:     jsr     R4,ENEATT
+        .byte   ^B11111000,0    ;attack AFDTS
+        bcs     ret
+
+2$:     tst     R2              ;stay put?
+        bmi     ret             ;yes
+        jmp     AROUND          ;turn around till okmove is found
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ARMTAR
+; Purpose: Search for a target city for the army to attack. If found, C=1
+;          and IFO and ILA are set.
+; Use:
+;       call    ARMTAR
+;
+; R0,R1,R2,R4 destroyed
+;
+
+ARMTAR: mov     #CITMAX,R0      ;max # of cities
+        call    RANDOM          ;select random city
+        push    R0              ;terminating #
+        mov     #TARGET,R4
+        add     R5,R4           ;pointer into TARGET
+        mov     R0,R2           ;R2=city #
+
+loop1:  mov     R2,R0
+        add     R4,R0           ;R0=pointer into TARGET
+        tstb    (R0)            ;is it a target?
+        beq     eol1            ;no
+
+        mov     R2,R1
+        asl     R1
+        mov     CITLOC(R1),R1   ;R1=loc of city
+        mov     LOC(R5),R0      ;loc of unit
+        call    DIST            ;find distance between
+        if      R0 hi #12, eol1 ;if dist>12
+
+        mov     LOC(R5),R0      ;loc of unit
+        call    PATBLK          ;path to city?
+        bcs     eol1            ;no
+
+        movb    #15,IFO(R5)     ;set ifo
+        mov     R1,ILA(R5)      ;set ila
+        tst     (SP)+           ;pop loop end
+        sec
+        rts     PC
+
+eol1:   inc     R2                      ;next city
+        if      R2 ne #CITMAX, 1$       ;if no wrap around
+        clr     R2                      ;reset index
+1$:     if      R2 ne (SP), loop1       ;if not done
+        tst     (SP)+
+        clc
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; Find a target in LOCI. If found, C=1 and IFO, ILA are set.
+; R0,R1,R2,R4 destroyed
+;
+
+ARMLOC: mov     #LOCMAX,R4      ;# of elements in LOCI
+        mov     #LOCI,R2
+        add     R5,R2           ;R2=pointer to LOCI
+
+loop2:  mov     (R2)+,R1        ;get loc from LOCI
+        beq     eol2            ;no loc
+        mov     LOC(R5),R0      ;get loc of unit
+        call    DIST            ;find dist to loci
+        if      R0 hi #12, eol2 ;if dist > 12
+        mov     LOC(R5),R0
+        call    PATBLK          ;path to LOCI?
+        bcs     eol2            ;no
+
+        movb    #5,IFO(R5)      ;set ifo
+        mov     R1,ILA(R5)      ;set ila
+        sec
+        rts     PC
+
+eol2:   sob     R4,loop2
+        clc
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ARMTT
+; Purpose: Search for a T for the army to get on. If found, set C and ifo,
+;          ila of army, and set ila of T such that the T will head towards
+;          the army.
+; Use:
+;       call    ARMTT
+;
+; R0,R1,R2,R4 destroyed
+;
+
+ARMTT:  push    R3
+        mov     UNITOP,R0       ;max # of units
+        call    RANDOM
+        push    R0              ;terminating #
+        mov     R0,R3           ;R3=unit #
+
+loop3:  mov     R3,R2
+        asl     R2
+        mov     UNILOC(R2),R0   ;get loc of unit
+        beq     eol3            ;unit doesn't exist
+
+        ifb     UNIT2(R3) ne #<14*8>+T, eol3    ;if not T with ifo=14
+
+        call    CHKOWN          ;is it our unit?
+        bcs     eol3            ;no
+
+        mov     LOC(R5),R1      ;get loc of A
+        call    DIST            ;find dist to T
+        if      R0 hi #10, eol3 ;if dist > 10
+
+        movb    #1,IFO(R5)      ;set ifo
+        mov     R3,ILA(R5)      ;set ila to TT #
+        mov     R1,UNIILA(R2)   ;set ila of T to LOC
+        tst     (SP)+
+        pop     R3
+        sec
+        rts     PC
+
+eol3:   inc     R3                      ;next unit
+        if      R3 ne UNITOP, 1$        ;if no overflow
+        clr     R3              ;yes
+1$:     cmp     R3,(SP)         ;done?
+        bne     loop3           ;no
+        tst     (SP)+
+        pop     R3
+        clc
+        rts     PC
+
+        .end
+
+
+
+.

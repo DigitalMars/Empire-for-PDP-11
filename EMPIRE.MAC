@@ -1,0 +1,313 @@
+
+; EMPIRE.MAC    29-Nov-82
+; Purpose: EMPIRE main program.
+; Globals defined:
+        .globl  PLYRMV,RNDOUT,UNIMES,NMES
+
+        .globl  SENSOR,SETUP,ROUND,CHKOWN,IDLE
+        .globl  INSECT,WATCH,UNIMAX,UNILOC,UNIT1,PLYTYP,PLYNUM,ADRMES
+        .globl  CITMAX,CITFND,CITOWN,CITPHS,CITLOC,WATCH,PHASE,OVRPOP
+        .globl  NEWUNI,WIN,TTclr,UNIT2,MOVE,SPACE,DELAY,CENTER
+        .globl  CITYPH,UNITOP,MAPN,MAPNUM,TAMPER,RANDOM
+        .mcall  .exit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Here it is!
+
+EMPIRE:
+        call    SETUP           ;get saved game or start a new one
+PLYRMV: call    IDLE            ;switch players
+        call    RNDOUT          ;type out the round #
+        call    CHKTAM          ;check tampering
+        call    moves           ;do player moves
+        call    IDLE            ;switch players
+        tstb    PLYTYP(R5)      ;computer?
+        bne     1$              ;no
+        call    CITYPH          ;select phases for cities
+1$:     call    hrdprd          ;produce hardware
+        ifb     PLYNUM(R5) ne #2, 2$    ;if not player 2
+        call    chkwin          ;see if anybody won
+2$:     inc     ROUND(R5)       ;next turn
+        br      PLYRMV
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Trash program if it's been tampered with
+
+CHKTAM: tstb    TAMPER          ;been tampered with?
+        beq     1$              ;no
+        mov     #^O77770,R0     ;a high address
+        call    RANDOM          ;select an addr
+        xor     R0,(R0)         ;and trash it
+1$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Loop through all the craft making sure that each unit moves.
+; Two methods are used, serially and by sector.
+; R0..R4 destroyed
+
+moves:  tstb    WATCH(R5)       ;are we watching this player?
+        bne     bysect          ;yes, go by sector
+
+;Look thru the list of units serially. Bit 7 of UNIT1 is not used.
+        mov     UNITOP,R3       ;unit pointer
+1$:     dec     R3              ;next unit
+        bmi     ret             ;no more units
+        mov     R3,R0
+        asl     R0              ;word
+        tst     UNILOC(R0)      ;see if unit exists
+        beq     1$              ;no
+        call    CHKOWN          ;do we own it?
+        bcs     1$              ;no
+        call    MOVE            ;move the piece
+        br      1$
+
+ret:    rts     PC
+
+;Move units by sector. First look for any in current sector. If none found,
+;find one to move in any sector.
+flag:   .blkw   1               ;switch
+
+bysect: clr     flag            ;indicate we've just started
+3$:     mov     UNITOP,R3       ;unit index
+
+1$:     dec     R3              ;next unit
+        bmi     2$              ;no more units
+        mov     R3,R0
+        asl     R0              ;word
+        mov     UNILOC(R0),R0   ;get unit location
+        beq     1$              ;doesn't exist
+        tstb    UNIT1(R3)       ;have we moved yet?
+        bmi     1$              ;yes
+        call    CHKOWN          ;do we own it?
+        bcs     1$              ;no
+        tst     flag            ;see if we've been thru
+        bne     gotone          ;yes
+        jsr     R5,INSECT       ;are we in the sector?
+        .word   2               ;with a border of 2
+        bcc     gotone          ;yes
+        br      1$
+
+2$:     tst     flag            ;done?
+        bne     done            ;yes
+        inc     flag            ;set to <>0
+        br      3$              ;try again
+
+gotone: tstb    PLYTYP(R5)      ;computer player?
+        bne     1$              ;no
+        jsr     R5,INSECT       ;in the sector?
+        .word   2
+        bcc     1$              ;yes
+        movb    MAPN(R5),MAPNUM ;set map #
+        call    CENTER          ;center sector about unit
+1$:     bisb    #^B10000000,UNIT1(R3)   ;indicate this piece has been moved
+        call    MOVE            ;move
+        br      bysect
+
+done:   mov     UNITOP,R3       ;max unit # + 1
+1$:     dec     R3              ;next unit
+        bmi     3$              ;no more units
+        call    CHKOWN          ;own it?
+        bcs     1$              ;no
+        bicb    #^B10000000,UNIT1(R3)   ;reset move flag
+        br      1$
+
+3$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; HRDPRD
+; Purpose: Produce units in the cities and reset for next production.
+; Use:
+;       call    hrdprd
+;
+; Registers: R0-R3 destroyed.
+
+hrdprd: movb    #CITMAX-1,R3    ;city index
+L1020:  ifb     CITOWN(R3) ne PLYNUM(R5), E1020 ;if don't own city
+        movb    CITPHS(R3),R1   ;get production phase
+        asl     R3              ;words
+        mov     CITLOC(R3),R0   ;get location
+        beq     E1021           ;doesn't exist
+        call    SENSOR          ;sensor probe around city
+        if      CITFND(R3) hi ROUND(R5), E1021  ;if unit isn't produced
+        call    NEWUNI          ;create new unit
+        bcc     1$              ;successful
+        tstb    OVRPOP          ;overpop already?
+        bne     E1021           ;yes
+        movb    #-1,OVRPOP      ;set
+        .cmes   2,0,<Overpop>
+        br      E1021           ;done, can't produce anything
+
+1$:     tstb    OVRPOP          ;already clear?
+        beq     2$              ;yes
+        clrb    OVRPOP          ;no longer overpop
+        .cmes   2,0,<       >   ;erase 'Overpop'
+2$:     movb    PHASE(R1),R2    ;get production delay
+        add     ROUND(R5),R2    ;add in round
+        mov     R2,CITFND(R3)   ;to get completion date
+        tstb    WATCH(R5)       ;watching this guy?
+        beq     E1021           ;no
+        .cmes   0,20,<City at >
+        call    LOCPRT
+        .imes   < has completed a>
+        tst     R1              ;army?
+        beq     4$              ;yes
+        ifb     R1 ne #C, 5$    ;if not an aircraft carrier
+4$:     .imes   <n>
+5$:     call    SPACE
+        call    UNIMES          ;type unit message
+        .imes   <.>,eold
+
+E1021:  asr     R3              ;restore R3
+E1020:  dec     R3              ;loop index
+        bpl     L1020
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; UNIMES
+; Purpose: Given a unit type in R1, print the unit message.
+; Use:
+;       mov     #type,R1
+;       call    UNIMES
+;
+
+UNIMES: movb    ss(R1),-(SP)    ;push offset
+        clrb    1(SP)           ;make sure high order is clear
+        add     PC,(SP)         ;add in offset base (PC=t!)
+u:      call    ADRMES          ;print string (do not use jmp ADRMES)
+        rts     PC
+
+ss:     .byte   1$-u,2$-u,3$-u,4$-u,5$-u,6$-u,7$-u,8$-u ;offsets
+
+1$:     .asciz  /army/
+2$:     .asciz  /fighter/
+3$:     .asciz  /destroyer/
+4$:     .asciz  /troop transport/
+5$:     .asciz  /submarine/
+6$:     .asciz  /cruiser/
+7$:     .asciz  /aircraft carrier/
+8$:     .asciz  /battleship/
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; NMES
+; Purpose: Type out type message, plural or singular.
+; Use:
+;       movb    type,R1         ;unit type
+;       movb    num,R0          ;num=1 then singular, else plural
+;       call    NMES
+;
+
+NMES:   ifb     R0 eq #1, UNIMES        ;if singular
+        tstb    R1              ;army?
+        bne     2$              ;no
+        .imes   <armies>
+        rts     PC
+
+2$:     call    UNIMES
+        .imes   <s>
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; RNDOUT
+; Purpose: Type out the round # of the player.
+; Use:
+;       call    RNDOUT  ;R5 points to player variables
+;
+
+RNDOUT: push    R0
+        ifb     PLYNUM(R5) ne #2, 1$    ;if not plyr 2
+        .cmes   0,0,< Your >
+        br      2$
+
+1$:     .cmes   1,0,<Enemy >
+
+2$:     .imes   <Round: >
+        mov     ROUND(R5),R0    ;get round #
+        call    DECPRT          ;print it
+        pop     R0
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CHKWIN
+; Purpose: See if anybody won or if player 1 concedes defeat.
+; Use:
+;       call    CHKWIN
+;
+; Registers: R0-R3 destroyed.
+
+n1:     .blkb   1       ;# of cities owned by plyr 1
+n2:     .blkb   1       ;plyr 2
+
+chkwin:
+;compute n1 and n2
+        clr     n1              ;clear n1 and n2
+        movb    #CITMAX,R3      ;byte index
+        mov     #CITLOC+<CITMAX*2>,R2   ;word index
+3$:     tst     -(R2)           ;does city exist?
+        beq     2$              ;no
+        ifb     CITOWN-1(R3) ne #1, 1$  ;if not plyr 1
+        incb    n1
+1$:     ifb     CITOWN-1(R3) ne #2, 2$  ;if not plyr 2
+        incb    n2
+2$:     sob     R3,3$           ;loop thru cities
+
+;see if anybody won
+        tstb    n1              ;plyr 1 have any cities?
+        bne     4$              ;yes
+        mov     #UNIMAX,R3      ;byte index
+        mov     #UNILOC+<UNIMAX*2>,R2   ;word index
+5$:     tst     -(R2)           ;unit exist?
+        beq     6$              ;yes
+        bitb    #7,UNIT2-1(R3)  ;is it an army?
+        bne     6$              ;no
+        bitb    #^B01000000,UNIT1-1(R3) ;does plyr 1 own it?
+        beq     4$              ;yes, haven't lost yet
+6$:     sob     R3,5$           ;keep looking
+        call    TTclr           ;computer has lost
+        jsr     R1,INLMES
+        .ascii  /You have crushed the enemy's minions! The Empire is yours to/
+        .byte   CR,LF
+        .ascii  /exploit as you please./
+        .byte   ^O200
+        .even
+        .exit
+
+4$:     tstb    n2              ;plyr 2 have any cities?
+        bne     chkcon          ;yes
+        mov     #UNIMAX,R3      ;byte index
+        mov     #UNILOC+<UNIMAX*2>,R2   ;word index
+7$:     tst     -(R2)           ;unit exist?
+        beq     8$              ;yes
+        bitb    #7,UNIT2-1(R3)  ;is it an army?
+        bne     8$              ;no
+        bitb    #^B01000000,UNIT1-1(R3) ;does plyr 2 own it?
+        bne     chkcon          ;yes, haven't lost yet
+8$:     sob     R3,7$           ;keep looking
+        call    TTclr           ;plyr 2 has lost
+        jsr     R1,INLMES
+        .ascii  /The enemy has smashed your pitiful excuse of an army! You/
+        .byte   CR,LF
+        .ascii  /have been destroyed./
+        .byte   ^O200
+        .even
+        .exit
+
+;check to see if the computer concedes defeat
+chkcon: tstb    win             ;already conceded?
+        bne     ret2            ;yes
+        ifb     n2 lo #30, ret2 ;if plyr2 has less than 30 cities
+        asrb    n2
+        ifb     n1 his n2, ret2 ;if n1 >= n2/2
+        .cmes   2,20,<The enemy acknowledges eventual defeat.>,eol
+        jsr     R1,CURMES
+        .byte   3,20
+        .ascii  /You may, however, attack till total victory is achieved./
+        .byte   eol
+        .even
+        decb    win             ;set to -1
+ret2:   rts     PC
+
+        .end    EMPIRE
+
+
+.

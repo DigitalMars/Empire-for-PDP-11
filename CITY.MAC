@@ -1,0 +1,350 @@
+
+;CITY.MAC       21-Nov-82
+;Globals defined:
+        .globl  CITYCT,CITYPH,PHASIN,PHASE,PHSTRT
+
+        .globl  CITFND,NUMOWN,CLEAR,NUMTAR,NUMPHS,UNIMAX,NUMUNI
+        .globl  UNILOC,UNIILA,UNIT1,UNIT2,INSECT,CENTER,FNDMAP
+        .globl  ROUND,pcur24,MAPN,LOCMAX,VALCMD
+        .globl  CITLOC,CITMAX,CURMES,ARROW,MAP,CHAMAP,TTin,PHASE
+        .globl  TARGET,LOCI,MAPPRT,MAPN,MAPNUM,OPT,PLYTYP,WATCH
+        .globl  INMASK,OWN,PLYNUM,TYP,CITOWN,CITMAX,CITPHS,CITLOC
+        .globl  PATLND,CHKOWN,TYPCIT,EDGER,DIST,BELL,CITPHS
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Update NUMOWN, NUMTAR, NUMPHS
+
+CITYCT: .savacs
+        mov     R5,1$
+        mov     R5,2$
+        add     #NUMUNI,1$
+        add     #NUMUNI+26,2$   ;clear 26 bytes
+        jsr     R5,CLEAR
+1$:     .blkw   1
+2$:     .blkw   1               ;clear NUMUNI,NUMOWN,NUMTAR,NUMPHS
+
+        mov     #UNILOC+<UNIMAX*2>,R2   ;loc index
+        mov     #UNIMAX-1,R3    ;unit index
+3$:     tst     -(R2)           ;unit exist?
+        beq     4$              ;no
+        call    CHKOWN          ;own it?
+        bcs     4$              ;no
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get unit type
+        asl     R1              ;word
+        add     R5,R1
+        inc     NUMUNI(R1)      ;increment # of that unit
+4$:     dec     R3
+        bpl     3$
+
+        mov     #CITMAX,R1      ;loop index
+L200:   mov     R1,R0
+        add     R5,R0
+        tstb    TARGET-1(R0)    ;is city a TARGET?
+        beq     3$              ;no
+        incb    NUMTAR(R5)      ;inc # of TARGETs
+3$:     ifb     CITOWN-1(R1) ne PLYNUM(R5), 200$ ;if we don't own this city
+        incb    NUMOWN(R5)      ;inc # of owned cities
+        movb    CITPHS-1(R1),R0 ;get phase of city
+        bmi     200$            ;no phase
+        add     R5,R0
+        incb    NUMPHS(R0)      ;inc # of cities producing that unit
+200$:   sob     R1,L200
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;
+; For the human player, get a production phase for a city.
+; Input:
+;       R3 =    city #
+
+PHASIN: .savacs
+        mov     R3,R4
+        asl     R4
+        add     #CITLOC,R4      ;R4 -> city loc
+        mov     (R4),R0         ;R0 = city loc
+        jsr     R5,INSECT
+        .word   2               ;is city in sector?
+        bcc     3$              ;yes
+        call    CENTER          ;center sector about city
+3$:     call    TYPCIT          ;type out data for city
+        .cmes   0,20,<City production demands: >,eol
+4$:     mov     (R4),R0         ;get city loc
+        call    PCUR24          ;put cursor onto city
+        call    TTin            ;get phase
+        call    FNDMAP          ;get #
+        bcc     1$              ;it's good
+2$:     call    BELL            ;it's bad
+        call    VALCMD          ;list valid commmands
+        br      4$              ;try again
+
+1$:     movb    TYP(R1),R1      ;get unit type
+        bmi     2$              ;if not a unit
+        movb    R1,CITPHS(R3)   ;new phase
+        mov     ROUND(R5),CITFND-CITLOC(R4)     ;so dst = CITFND
+        movb    PHSTRT(R1),R1
+        add     R1,CITFND-CITLOC(R4)    ;CITFND=ROUND+PHSTRT (completion date)
+        jmp     TYPCIT          ;type new city data
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; PHSTRT & PHASE
+
+PHASE:  .byte   5,10,20,30,25,50,60,75  ;production times for units
+PHSTRT: .byte   6,12,24,36,30,60,72,90  ;starting production time
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Select city phases for enemy.
+; R0-R4 destroyed.
+
+;some temporary variables for CITYPH:
+        n:      .blkb   1
+        iniphs: .blkb   1       ;initial city phase
+        edge:   .blkb   1       ;number of seas around city
+        crowd:  .blkb   1       ;is unit crowded?
+
+CITYPH: call    CITYCT          ;bring variables up to date
+        mov     #CITMAX-1,R3    ;city index
+loop:   ifb     PLYNUM(R5) ne CITOWN(R3), eol2  ;if not own city
+        mov     R3,R0
+        asl     R0
+        mov     CITLOC(R0),R0   ;get loc of city
+        beq     eol2            ;city doesn't exist
+        clrb    MAPNUM          ;ref map
+        mov     R0,R1           ;save R0
+        call    EDGER           ;get # of seas around city
+        movb    R0,edge         ;save in edge
+        mov     R1,R0           ;restore R0
+        movb    CITPHS(R3),R1   ;get phase
+        movb    R1,iniphs       ;save initial phase
+        call    Ecrowd          ;set crowd variable
+
+        tstb    iniphs          ;does city have a valid phase?
+        bmi     nophs           ;no
+
+;if CITFND<>ROUND+PHASE-1 then jmp EOLOOP
+        movb    CITPHS(R3),R1   ;get city phase
+        movb    PHASE(R1),R2
+        dec     R2
+        add     ROUND(R5),R2
+        mov     R3,R4           ;get city #
+        asl     R4
+        sub     CITFND(R4),R2
+        beq     L102
+eol2:   jmp     eoloop
+
+nophs:  clrb    CITPHS(R3)      ;default to making armies
+        br      L300
+
+;Evaluate phase and select a new one if necessary
+L102:   ifb     edge ne #8, L101        ;if not an island city
+
+isle:   call    ISLAND          ;evaluate phase for island city
+        jmp     L401
+
+L101:   ifb     CITPHS(R3) ne #F, 1$    ;if not making Fs
+        tst     NUMUNI+<2*F>(R5)        ;do we have some Fs?
+        beq     1$                      ;no
+        ifb     NUMOWN(R5) eq #1, nophs ;if only 1 city
+        ifb     NUMOWN+<A*2>(R5) los NUMUNI+<F*2>(R5), nophs
+
+1$:     tstb    CITPHS(R3)      ;making armies?
+        bne     eoloop          ;no
+        ifb     NUMPHS+A(R5) los #1, eoloop     ;if only 1 city making armies
+        call    NEARCT                  ;armies nearby?
+        ifb     n los #5, eoloop        ;if not many
+
+;select a new phase for the city
+L300:   ifb     edge eq #8, isle        ;if island city
+        call    CKLOCI          ;make armies due to LOCI nearby?
+        bcs     L400            ;yes
+
+L504:   call    MAKFs           ;determine whether to make As or Fs
+        bcs     L400            ;yes
+
+L600:   call    SELSHP          ;select a ship
+
+L400:   tstb    edge            ;land-locked?
+        beq     L401            ;yes
+        tstb    NUMPHS+T(R5)    ;NUMPHS(T)=0?
+        bne     L401            ;no
+        ifb     NUMOWN(R5) los #1, L401 ;if own only 1 city
+        movb    #T,CITPHS(R3)   ;make Ts
+
+L401:   movb    CITPHS(R3),R1   ;get city phase
+        ifb     R1 eq iniphs, eoloop    ;if phase didn't change
+        asl     R3
+        mov     ROUND(R5),CITFND(R3)
+        movb    PHSTRT(R1),R1
+        add     R1,CITFND(R3)   ;CITFND=ROUND+PHSTRT (completion date)
+        asr     R3
+        call    CITYCT          ;update NUMPHS
+          .if   eq,debug
+        call    CITWAT          ;watch city
+          .endc
+eoloop: dec     R3
+        bmi     1$
+        jmp     loop
+1$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;
+; Count # of armies within 6 spaces of city R3 and on the
+; same continent.
+; Input:
+;       R0 =    city loc
+;       R3 =    city number
+; Output:
+;       n =     # of armies within 6 spaces
+;       R1,R2   destroyed
+
+NEARCT: clrb    n               ;count
+        mov     #UNILOC+<UNIMAX*2>,R2   ;unit loc index
+        push    R3
+        mov     #UNIMAX-1,R3    ;unit index
+        push    R0              ;city loc
+1$:     mov     (SP),R0         ;get city loc
+        mov     -(R2),R1        ;get unit loc
+        beq     503$            ;doesn't exist
+        bitb    #7,UNIT2(R3)    ;is unit an A?
+        bne     503$            ;no
+        call    CHKOWN          ;own unit?
+        bcs     503$            ;no
+        mov     (SP),R0         ;get city loc
+        call    DIST            ;distance from city to unit
+        ifb     R0 hi #6, 503$  ;if distance > 6
+        mov     R1,R0           ;get unit loc
+        call    MAP             ;see what's there
+        ifb     TYP(R1) eq #T, 503$     ;if A is aboard a T
+        mov     R0,R1           ;get unit loc
+        mov     (SP),R0         ;get city loc
+        call    PATLND          ;path to unit?
+        bcs     503$            ;no path
+        incb    n               ;another one
+503$:   dec     R3
+        bpl     1$
+        pop     R0
+        pop     R3
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;
+; Calculate crowd. Crowd=0 if there is a '+' around the city
+; else crowd<>0.
+; R0,R1,R2,R4 destroyed
+
+Ecrowd: clrb    crowd           ;default is not crowded
+        movb    #7,R2           ;8 directions
+3$:     mov     R0,R4           ;save loc
+        call    ARROW           ;get new loc
+        call    MAP             ;see what's there
+        mov     R4,R0           ;restore loc
+        ifb     R1 eq #3, 1$    ;if R1 = '+'
+        dec     R2              ;next dir
+        bpl     3$
+        decb    crowd           ;set crowd=-1
+1$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;
+; Evaluate city phase for an island city
+; R1,R2,R4 destroyed
+
+ISLAND: ifb     NUMOWN(R5) los #1, 4$   ;if only 1 city
+        tstb    CITPHS(R3)      ;making armies?
+        bne     5$              ;no
+        br      SELSHP          ;make a ship
+
+4$:     clrb    CITPHS(R3)      ;armies
+        tst     NUMUNI+<2*T>(R5)        ;number of Ts>=1?
+        bne     5$              ;yes
+        movb    #T,CITPHS(R3)   ;make Ts
+5$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; Select a ship to be produced, giving priority to 2 T and 1 C
+; producing cities.
+; R2,R4 destroyed
+
+SELSHP: movb    #B,CITPHS(R3)   ;make Bs
+        movb    #C,R2
+1$:     mov     R2,R4
+        add     R5,R4
+        ifb     NUMPHS+1(R4) lo NUMPHS(R4), 601$        ;if less
+        bcs     601$            ;yes
+        movb    R2,CITPHS(R3)   ;new phase
+601$:   dec     R2              ;next phase
+        ifb     R2 ne #F, 1$    ;if not done
+
+        tstb    NUMPHS+C(R5)    ;NUMPHS(C)=0?
+        bne     2$              ;no
+        movb    #C,CITPHS(R3)   ;make Cs
+2$:     ifb     NUMPHS+T(R5) his #2, 3$ ;if more than 1 making Ts
+        movb    #T,CITPHS(R3)   ;make Ts
+3$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+; If there are LOCI on the same continent, set CITPHS to A, and set C
+; Input:
+;       R0 =    city loc
+; Output:
+;       R1,R2,R4 destroyed
+
+CKLOCI: mov     #LOCI,R2
+        add     R5,R2           ;index into LOCI
+        mov     #LOCMAX,R4      ;control count
+1$:     mov     (R2)+,R1        ;get loc from LOCI
+        beq     500$            ;no loc
+        call    PATLND          ;path to LOCI?
+        bcs     500$            ;no
+        clrb    CITPHS(R3)      ;make armies
+        sec
+        rts     PC
+
+500$:   sob     R4,1$
+        clc
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;
+; Determine whether Fs or As should be made. Set CITPHS and
+; set C=1 if so.
+; Input:
+;       R0 =    city loc
+; Output:
+;       R1,R2 destroyed
+
+MAKFs:  mov     #F,CITPHS(R3)   ;make fighters
+        tstb    edge            ;port city?
+        bne     L501            ;yes
+        push    NUMUNI+<F*2>(R5)
+        asl     (SP)            ;*2
+        add     NUMUNI+<F*2>(R5),(SP)   ;(SP)=3*NUMUNI(F)
+        sub     NUMUNI(R5),(SP)+        ;NUMUNI(A)<=3*NUMUNI(F)?
+        bmi     cret            ;no
+        clrb    CITPHS(R3)      ;make armies
+cret:   sec
+        rts     PC
+
+L501:   call    NEARCT          ;count # of nearby armies
+        ifb     n lo #3, 1$     ;if not many
+        movb    NUMOWN(R5),R2   
+        asr     R2              ;R2=NUMOWN/2
+        cmp     NUMUNI+<F*2>(R5),R2     ;NUMUNI(F)<NUMOWN/2?
+        rts     PC                      ;if yes, then C=1
+
+1$:     clrb    CITPHS(R3)      ;make As
+        br      cret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Watch how city phases change
+; R0 destroyed
+          .if   eq,debug
+CITWAT: .cmes   3,20,<City at >
+        call    LOCPRT
+        .imes   < from >
+        movb    iniphs,R0
+        call    DECPRT
+        .imes   < to >,eol
+        movb    CITPHS(R3),R0
+        jmp     DECPRT
+          .endc
+        .end
+
+
+.

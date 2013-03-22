@@ -1,0 +1,358 @@
+
+; MAPS.MAC      6-Apr-83
+; Routines to encode and decode the maps
+; Globals defined:
+        .globl  SEAHI,SEALO,LANDHI,LANDLO,OWN,TYP
+        .globl  MAP,CHAMAP,IROWCO,DIST,MOVDIR,BORDER
+        .globl  ARROW,FNDMAP,EDGER,CHKMAP,CHKLOC,CHKDIR
+
+        .globl  MAPTAB,MAPMAX,RNGNRM,MAPNUM,MAPS,INMASK
+
+.macro  .rowco                  ;separate R0 into R0 and R1
+        mov     R0,R1
+        clrb    R0              ;clear LSB
+        bic     R0,R1           ;clear MSB of R1
+        swab    R0              ;put row in right half
+.endm
+
+;Tables for unit player # and unit types.
+
+;                ,*,.,+,O,X,A,F,F,D,T,S,R,C,B,a,f,f,d,t,s,r,c,b
+OWN:    .byte   0,0,0,0,2,1,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1,1,1,1
+TYP:    .byte   J,X,J,J,X,X,A,F,F,D,T,S,R,C,B,A,F,F,D,T,S,R,C,B
+
+;Bit maps for INMASK
+;          *.+OXAFFDTSRCBaffdtsrcb
+seahi=  ^B0010000011111110
+sealo=                  ^B0111111100000000
+landhi= ^B0001001100000001
+landlo=                 ^B1000000000000000
+
+offset: .word   maps,maps+4000,maps+8000        ;3 maps stored here
+
+;Map characters are stored 3 to a word. Here are the masks for them
+masks:  .word   ^B0000000000011111
+        .word   ^B0000001111100000
+        .word   ^B0111110000000000
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given a map number and location, find what's there.
+; Input:
+;       MAPNUM =        map # (0,1,2)
+;       R0 =            map location
+; Output:
+;       R1 =            map value
+
+MAP:
+          .if   eq,debug
+        call    CHKLOC
+          .endc
+        push    R2
+        push    R0
+        call    decode          ;(R1) is data, R2 is position (1,2,3)
+        mov     (R1),R1         ;get packed word
+        dec     R2
+        beq     1$              ;shift till right justified
+2$:
+.if     eq,EIS                  ;EIS machine?
+.ift
+        ash     #-5,R1          ;shift right
+.iff
+        asr     R1
+        asr     R1
+        asr     R1
+        asr     R1
+        asr     R1
+.endc
+        sob     R2,2$                   ;loop
+1$:     bic     #^B1111111111100000,R1  ;mask off extraneous data
+        pop     R0
+        pop     R2
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Inverse of MAP (change a map location)
+; Input:
+;       MAPNUM =        map # (0,1,2)
+;       R0 =            map location
+;       R1 =            map value
+
+CHAMAP:
+          .if   eq,debug
+        call    CHKLOC
+        call    CHKMAP
+          .endc
+        push    <R2,R0,R1>
+        call    decode          ;get address and position
+        mov     (SP),R0         ;put newval in R0
+        asl     R2              ;get word offset
+        bic     masks-2(R2),(R1)        ;clear bits we're going to change
+        asr     R2              ;back to 1,2,3
+        dec     R2
+        beq     1$              ;shift into correct position
+2$:
+.if     eq,EIS                  ;EIS machine?
+.ift
+        ash     #5,R0           ;shift left 5 times
+.iff
+        asl     R0
+        asl     R0
+        asl     R0
+        asl     R0
+        asl     R0
+.endc
+        sob     R2,2$           ;loop
+1$:     bis     R0,(R1)         ;OR in new data
+        pop     <R1,R0,R2>
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Calculate addr and location of data in a map
+; Input:
+;       MAPNUM =        map #
+;       R0 =            loc
+; Output:
+;       R1 =    address of data word
+;       R2 =    position of data in word (1=right 5 bits, 2=middle
+;               5 bits, 3=left 5 bits)
+;       R0      destroyed
+
+decode: .rowco                  ;separate loc into row and column
+        clr     R2
+1$:     inc     R2
+        sub     #20,R0          ; row=0-19 > R2=1, 20-39 > 2, 40-59 > 3
+        bpl     1$              ;continue till we go negative
+        add     #20,R0          ; R0=0-19 now, R2=1-3
+.if     eq,EIS                  ;EIS machine?
+.ift
+        mul     #20,R1
+.iff
+        asl     R1
+        asl     R1
+        add     R1,R0
+        asl     R1
+        asl     R1
+.endc
+        add     R0,R1           ;R1=col*20+(row mod 20)
+        asl     R1              ;*2 for word address
+        movb    mapnum,R0       ;get which map we're on
+        asl     R0              ;words
+        add     offset(R0),R1   ;add base address
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Separate R0 into row and column.
+; Input:
+;       R0 =    loc (MSB=row, LSB=col)
+; Output:
+;       R0 =    row
+;       R1 =    column
+
+IROWCO: .rowco
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Find the distance between 2 locations.
+; Input:
+;       R0 =    first loc
+;       R1 =    second loc
+; Output:
+;       R0 =    distance between
+
+DIST:   push    R2
+        push    R1              ;(SP)=column, 1(SP)=row
+        .rowco                  ;split R0 into row and column
+        movb    1(SP),R2        ;get row
+        sub     R2,R0           ;subtract the rows
+        bpl     1$              ;we want absolute value in R0
+        neg     R0              ;make it positive
+1$:     movb    (SP),R2         ;get column
+        sub     R2,R1           ;column offset
+        bpl     2$
+        neg     R1              ;take absolute value
+2$:     ifb     R0,his,R1,3$    ; R0=max(R0,R1)
+        mov     R1,R0           ;if R1>R0
+3$:     pop     <R1,R2>
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Find the direction to go in to move from loc 1 to loc 2.
+; Input:
+;       R0 =    loc 1
+;       R1 =    loc 2
+; Output:
+;       R2 =    direction (if R0=R1 then R2=-1)
+;
+; Directions:   321
+;               4 0
+;               567
+
+MOVDIR: push    R0
+        push    R1              ;1(SP)=row, (SP)=column
+        call    IROWCO          ;split R0 into row and column
+        clr     R2              ;index into movtab
+        cmpb    (SP),R1         ;compare columns (TO - FROM)
+        beq     1$              ;2 or 6
+        bmi     2$              ;3,4 or 5
+        inc     R2              ;else 1,0 or 7
+2$:     inc     R2              ;dif index for each case
+1$:     mov     R2,R1
+        asl     R2
+        add     R2,R1           ;R1=R2*3
+        cmpb    1(SP),R0        ;compare rows (TO - FROM)
+        beq     3$              ;4,0
+        bmi     4$              ;3,2,1
+        inc     R1              ;else 5,6,7
+4$:     inc     R1
+3$:     movb    movtab(R1),R2   ;get the direction
+        pop     R1
+        pop     R0
+        rts     PC
+
+movtab: .byte   -1,2,6,4,3,5,0,1,7      ;direction table
+        .even
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Is location on the edge of the map?
+; Input:
+;       R0 =    location
+; Output:
+;       C = 1   if on edge
+
+BORDER: push    R0
+        push    R1
+        call    IROWCO
+        jsr     R5,RNGNRM
+        .byte   1,Mrowmx-1      ;see if on top or bottom row
+        bcs     yes
+        mov     R1,R0           ;put col in R0
+        jsr     R5,RNGNRM
+        .byte   1,Mcolmx-1      ;see if on left or right edge
+yes:    pop     R1
+        pop     R0
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Purpose: Given a direction (0-7) in R2 and a location in R0, find
+;          the new location. The row and column in R0 are treated separately
+;          as signed bytes. If R2=-1 then R0 is unaffected.
+; Input:
+;       R0 =    loc
+;       R2 =    direction (-1 is allowed)
+; Output:
+;       R0 =    new loc (unaffected if R2=-1)
+;
+; Directions: 321
+;             4 0
+;             567
+
+ARROW:  push    R0              ;(SP)=column
+        clrb    R0              ;clear right half so no carry occurs
+        asl     R2              ;get word offset
+        add     arrtab(R2),R0   ;add row offset
+        asr     R2              ;restore R2
+        add     R0,(SP)         ;add column offset
+        clrb    R0              ;clear LSB
+        bisb    (SP)+,R0        ;OR in column
+        rts     PC
+
+.macro  rowcol  rowoff,coloff
+        .byte   coloff,rowoff   ;so rowoff=MSB, coloff=LSB
+.endm
+
+        rowcol   0, 0           ;no offset if R2=-1
+arrtab:                         ;table of offsets
+        rowcol   0, 1
+        rowcol  -1, 1
+        rowcol  -1, 0
+        rowcol  -1,-1
+        rowcol   0,-1
+        rowcol   1,-1
+        rowcol   1, 0
+        rowcol   1, 1
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Take a map character in R0, and find the number of the
+; corresponding entry in MAPTAB, and return that in R1.
+; Input:
+;       R0 =    character
+; Output:
+;       if (R0 in MAPTAB) then R1=map value, C=0
+;       else R1=-1, C=1
+
+FNDMAP: mov     #mapmax,R1      ;# of entries in MAPTAB
+1$:     ifb     MAPTAB-1(R1) eq R0, 2$  ;see if R0 matches entry
+        sob     R1,1$           ;loop till found
+        sec                     ;didn't find it, set C
+2$:     dec     R1              ;convert such that R0=MAPTAB(R1)
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Total up the number of sea locs around loc, and return count in R0.
+; Set Z according to R0.
+; Input:
+;       R0 =    loc
+; Output:
+;       R0 =    count
+;       Z =     tst(R0)
+
+EDGER:  .savacs
+        clr     AC0(SP)         ;# of locs that are sea
+        mov     #7,R2           ;direction & control count
+2$:     push    R0              ;save loc
+        call    ARROW           ;get new loc
+        call    MAP             ;what's there?
+        pop     R0              ;restore loc
+        jsr     R5,INMASK       ;sea or blank?
+        .word   seahi!^O100000,sealo
+        bcc     1$              ;no
+        inc     AC0(SP)         ;found 1
+1$:     dec     R2              ;next direction
+        bpl     2$
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CHKMAP,CHKDIR,CHKLOC
+; Check to see that map values in R1, dirs in R2, and locs in R0
+; are legal.
+
+CHKMAP: if      R1 los #23,retc
+        .cmes   4,0,<CHKMAP >
+        br      thalt
+
+CHKDIR: if      R2 eq #-1,retc
+        bit     #^O177770,R2
+        beq     retc
+        .cmes   4,0,<CHKDIR >
+        br      thalt
+
+CHKLOC: push    R0
+        push    R1
+        call    IROWCO
+        if      R0 hi #Mrowmx, L1
+        if      R1 hi #Mcolmx, L1
+        pop     R1
+        pop     R0
+retc:   rts     PC
+
+L1:     .cmes   4,0,<CHKLOC >
+        pop     R1
+        pop     R0
+
+thalt:  .test   0
+        halt
+
+        .end
+
+
+.

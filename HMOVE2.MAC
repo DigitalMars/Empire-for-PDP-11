@@ -1,0 +1,540 @@
+
+; HMOVE2.MAC    1-Dec-82
+; Some subroutines for HMOVE.
+; Globals defined:
+        .globl  ABOARD,OWNUP,HEADNG,TCAF,ENELTR,MYCODE,FULL,CITLTR
+        .globl  TLTR,SURSEA,FNCPRT,OKMOVE,LSTVAR
+
+        .globl  TYPE,TYP,OWN,IFO,LOC,ILA,MOVDIR,HITTAB,HITS,GAS,UNITOP
+        .globl  LTR,ARROW,FNDUNI,PLYNUM,UNIT1,UNIT2,UNIMAX,UNILOC,YOUR,UNIMES
+        .globl  SPACE,NMES,UNIILA,ADRMES,TTout,TARGET
+        .globl  CITMAX,CITLOC,NUMUNI,NUMPHS,NUMOWN,NUMTAR,PLYR,BORDER
+        .globl  RANDOM,SAVACS,INMASK,SEAHI,SEALO,AB,TEST,FNDCIT,FIPATH,PLYTYP
+        .globl  AROUND,CLRSEC,TABBER,TROOPT,LOCMAX,LOCI,TTin
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Handle function moves.
+; Input:
+;       local variables set up
+;
+; Returns:      C=1:    Caller must pick a move.
+;               C=0:    R2 returns with the selected move.
+;               R0,R1 destroyed
+
+MYCODE: .curs   4,0
+        call    ENELTR          ;enemies in LTR?
+        bcs     wakeup          ;yes
+
+        ifb     TYPE(R5) ne #F, 2$      ;if not a fighter
+        movb    AB(R5),R1
+        ifb     TYP(R1) ne #-2, 2$      ;if not in a city
+        push    R3
+        mov     LOC(R5),R0      ;get loc
+        call    FNDCIT          ;get city #
+        asl     R3
+        add     R5,R3           ;pointer to FIPATH
+        tst     FIPATH(R3)      ;is there a fipath?
+        beq     3$              ;no
+        mov     FIPATH(R3),ILA(R5)      ;set ILA
+        movb    #3,IFO(R5)              ;move function
+3$:     pop     R3
+
+2$:     tstb    TYPE(R5)        ;army?
+        bne     1$              ;no
+        call    CITLTR          ;unowned city in LTR?
+        bcs     AW              ;yes, request move
+1$:     movb    IFO(R5),R2      ;get IFO
+        asl     R2              ;word
+        jmp     @ifotab(R2)     ;call processing routine
+
+ifotab: .word   AW,SE,RA,MO,DI,FI       ;function processors
+
+wakeup: clrb    IFO(R5)         ;wake up piece
+
+AW:     sec                     ;caller picks move
+        rts     PC
+
+FI:     call    FULL            ;is T (C) fully loaded?
+        bcs     wakeup          ;yes
+
+SE:     mov     #-1,R2          ;no move
+
+ok:     clc                     ;got a move
+        rts     PC
+
+;Pick a move at random
+RA:     tstb    TYPE(R5)        ;army?
+        bne     1$              ;no
+        call    TLTR            ;give priority to filling up a T
+        bcs     1$              ;no
+        clrb    IFO(R5)         ;wake up and get on T
+        br      ok
+1$:     mov     #8,R0           ;8 directions
+        call    RANDOM          ;get dir from 0-7
+        mov     R0,R2           ;move
+        call    AROUND          ;look for OKMOVE
+        bcc     di2             ;got one
+        br      AW              ;temporarilly unable to move
+
+;Move towards ILA
+MO:     mov     LOC(R5),R0      ;from
+        mov     ILA(R5),R1      ;to
+        call    MOVDIR          ;get dir in R2
+        tst     R2              ;arrived at ILA?
+        bmi     wakeup          ;yes
+okchk:  call    OKMOVE          ;is move allright?
+        bcc     ok              ;yes
+        br      AW              ;no move
+
+;Move in a direction
+DI:     movb    ILA(R5),R2      ;get move direction
+di2:    mov     LOC(R5),R0      ;get loc
+        call    ARROW           ;get new loc
+        call    BORDER          ;on edge?
+        bcs     wakeup          ;yes
+        ifb     TYPE(R5) ne #F, okchk   ;if not an F
+        movb    HITTAB+F,R0     ;get max range
+        asr     R0              ;/2
+        ifb     GAS(R5) eq R0, AW       ;if at half range
+        br      okchk
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; SURSEA
+; Purpose: If unit is an A on a T, and is surrounded by water or friendly
+;          cities, return with C=1 else C=0.
+; Use:
+;       call    SURSEA
+;
+
+SURSEA: tstb    TYPE(R5)        ;army?
+        bne     1$              ;no
+        jsr     R0,SAVACS
+        movb    AB(R5),R0       ;get map val
+        ifb     TYP(R0) ne #T, 1$       ;if not on a T
+        movb    #8,R2           ;control count
+        mov     #LTR+8,R4
+        add     R5,R4           ;pointer to LTR
+2$:     movb    -(R4),R1        ;get map val
+        ifb     TYP(R1) ne #-2, 3$              ;if not a city
+        ifb     OWN(R1) ne PLYNUM(R5), 1$       ;if unowned city
+        br      4$
+
+3$:     jsr     R5,INMASK
+        .word   SEAHI,SEALO     ;is it sea?
+        bcc     1$              ;no
+4$:     sob     R2,2$
+        sec                     ;can't move
+        rts     PC
+
+1$:     clc                     ;can move
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; TLTR
+; Purpose:      If there are any unloaded Ts in LTR, return C=0 with R2
+;               containing the direction. Else C=1.
+; Use:
+;       call    TLTR
+;
+
+TLTR:   .savacs
+        mov     #7,R2           ;direction
+        mov     #LTR+8,R4
+        add     R5,R4           ;LTR pointer
+2$:     movb    -(R4),R1        ;get LTR
+        ifb     TYP(R1) ne #T, 1$               ;if not a T
+        ifb     OWN(R1) ne PLYNUM(R5), 1$       ;if enemy T
+        mov     LOC(R5),R0      ;loc of unit
+        call    ARROW           ;get loc of T
+        call    FNDUNI          ;find # of T
+        call    FULL            ;is T full?
+        bcs     1$              ;yes
+        movb    R2,8(SP)        ;will be popped into R2
+        br      4$
+
+1$:     dec     R2              ;next dir
+        bpl     2$
+        sec                     ;no unloaded Ts in LTR
+4$:     rts     PC              ;restore ACs (C not affected)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given a move in R2 and unit # in R3, check to see if it's ok.
+; Use:
+;       mov     #dir,R2
+;       call    OKMOVE
+;
+; Returns:      C=0 if ok, else C=1
+;
+
+OKMOVE: push    R0
+        push    R1
+        mov     R2,R0
+        add     R5,R0
+        movb    LTR(R0),R1      ;find out what's where we're going
+        mov     LOC(R5),R0      ;get loc of unit
+        call    ARROW           ;get loc of where we're going
+        call    BORDER          ;is it on the edge?
+        bcs     notok           ;yes
+        tstb    TYPE(R5)        ;army?
+        bne     L1              ;no
+        ifb     R1 eq #3, itsok ;if R1 = '+'
+;if army is on a TT, it can't move onto sea
+        ifb     AB(R5) eq #10, 1$       ;if on a player 2 T
+        ifb     AB(R5) ne #18, 2$       ;if not on a player 1 T
+1$:     jsr     R5,INMASK       ;moving onto sea?
+        .word   SEAHI,SEALO
+        bcs     notok           ;yes
+
+2$:     cmpb    #T,TYP(R1)      ;moving onto T?
+L4:     bne     notok           ;no
+        ifb     OWN(R1) ne PLYNUM(R5), notok    ;if enemy C or T
+        push    R3
+        call    FNDUNI          ;find ship #
+        call    FULL            ;is it full?
+        pop     R3
+        bcs     notok           ;yes
+itsok:  clc
+        br      ret01
+
+L3:     ifb     TYPE(R5) ne #F, notok   ;if not a fighter
+        ifb     R1 eq #3, itsok         ;if R1='+'
+        cmpb    #C,TYP(R1)      ;carrier?
+        br      L4
+
+L1:     ifb     R1 eq #2, itsok                 ;if R1 = '.'
+        ifb     TYP(R1) ne #-2, L3              ;if R1 isn't a city
+        ifb     OWN(R1) ne PLYNUM(R5), notok    ;if we don't own the city
+        ifb     IFO(R5) eq #14, notok           ;if a computer T with IFO=14
+        call    ABOARD          ;if unit is a T (C), are there As (Fs) aboard?
+        tst     R0              ;R0= # aboard
+        beq     itsok           ;none aboard
+notok:  sec
+ret01:  pop     R1
+        pop     R0
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; FULL
+; Purpose:      Given unit # of T (C) in R3, set C if ship is full, else
+;               clear C.
+; Use:
+;       mov     #unitnum,R3
+;       call    FULL
+;
+
+FULL:   push    R0
+        push    R1
+        movb    UNIT1(R3),R0
+        bic     #^O177700,R0    ;get hits left
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get type
+        ifb     R1 ne #T, 1$    ;if not a transport
+        asl     R0              ;R0 is max number
+1$:     dec     R0              ;so cmp will set C if full
+        push    R0
+        call    ABOARD          ;how many are aboard?
+        cmp     (SP)+,R0        ;is it full?
+        br      ret01
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; ABOARD
+; Purpose:      Given unit # in R3, count how many As (Fs) are aboard a
+;               T (C). Return total in R0. Return 0 if unit is not a T (C).
+;Use:
+;       mov     unitnum,R3
+;       call    ABOARD
+;
+
+ABOARD: clr     R0              ;default to 0 aboard
+        .savacs
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get unit type in R1
+        call    TCAF
+        bcs     3$              ;not a T or C
+        asl     R3              ;word
+        mov     UNILOC(R3),R3   ;get loc of unit
+        mov     UNITOP,R4       ;loop counter
+        mov     R4,R2
+        asl     R2
+        add     #UNILOC,R2      ;R2 = pointer to UNILOCS
+
+5$:     if      R3 ne -(R2), 4$ ;if UNILOCs don't match
+        movb    UNIT2-1(R4),R0
+        bic     #^O177770,R0    ;get type of match
+        ifb     R0 ne R1, 4$    ;if not right type
+        inc     12(SP)          ;inc result (R0)
+4$:     sob     R4,5$           ;loop
+
+3$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;
+;OWNUP
+;Purpose: Given unit number in R3, type out 'Your' followed by the unit
+;         message. R1 returns with the unit type.
+; Use:
+;       mov     unitnum,R3
+;       call    OWNUP
+;
+
+OWNUP:  call    YOUR
+        movb    UNIT2(R3),R1
+        bic     #^O177770,R1    ;get type
+        jmp     UNIMES          ;type unit message
+
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;HEADNG
+;Purpose: Given unit number in R3, type out the heading of the unit.
+;Use:
+;       mov     unitnum,R3
+;       call    HEADNG
+;
+
+HEADNG: push    R0
+        push    R1
+        .curs   0,20
+        call    OWNUP
+        .imes   < at >
+        asl     R3
+        mov     UNILOC(R3),R0
+        asr     R3
+        call    LOCDOT          ;type unit loc
+        push    R1              ;save type
+        call    TCAF
+        bcs     hitlft          ;not a T or C
+        call    SPACE
+        call    ABOARD          ;see how many aboard
+        call    DECPRT          ;type it
+        call    SPACE
+        call    NMES
+        .imes   < aboard.>
+
+hitlft: pop     R1              ;restore type
+        movb    UNIT1(R3),R0
+        bic     #^O177700,R0    ;get hits left
+        tstb    R1              ;is it an army?
+        beq     next            ;yes
+        ifb     R1 ne #F, 2$    ;if not an F
+        .imes   < Range: >
+        br      1$
+2$:     .imes   < Hits: >
+1$:     call    DECPRT          ;type hits left
+
+next:   .curs   1,20            ;position cursor
+        movb    UNIT2(R3),R1
+        asr     R1
+        asr     R1
+        asr     R1
+        bic     #^O177740,R1    ;get ifo
+        asl     R3
+        mov     UNIILA(R3),R0   ;get ila
+        asr     R3
+        call    FNCPRT          ;print function
+        pop     R1
+        pop     R0
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;
+; Given ifo in R1 and ila in R0, print the function.
+; Input:
+;       R0 =    ila
+;       R1 =    ifo
+;       R3 =    unit #
+;
+; Registers: R0 destroyed
+
+FNCPRT:
+          .if   eq,debug
+        tstb    PLYTYP(R5)      ;computer player?
+        bne     1$              ;no
+        push    R0
+        mov     R1,R0
+        .imes   <IFO: >
+        call    DECPRT          ;type IFO
+        .imes   < ILA: >,eol
+        pop     R0
+        jmp     LOCDOT          ;type ILA
+1$:
+          .iff
+        tstb    PLYTYP(R5)      ;computer player?
+        beq     ret             ;yes
+          .endc
+
+        .imes   <Function: >,eol
+        movb    z(R1),-(SP)     ;push offset
+        clrb    1(SP)           ;make sure msb is clear
+        add     PC,(SP)         ;add in base (PC=y!)
+y:      call    ADRMES
+        ifb     R1 ne #3, 1$    ;if not MOVE TO
+        call    LOCPRT          ;type ila
+1$:     ifb     R1 ne #4, ret   ;if not DIR
+        movb    dtab(R0),R0     ;get letter
+        jmp     TTout
+
+ret:    rts     PC
+
+z:      .byte   1$-y,2$-y,3$-y,4$-y,5$-y,6$-y
+
+1$:     .asciz  /None/
+2$:     .asciz  /Sentry/
+3$:     .asciz  /Random/
+4$:     .asciz  /Move to /
+5$:     .asciz  /Direction= /
+6$:     .asciz  /Fill/
+        .even
+
+dtab:   .ascii  /DEWQAZXC/      ;direction table
+
+;;;;;;;;;;;;;;;;;;;;;
+; ENELTR,CITLTR
+; Purpose: ENELTR: Return C=1 if there is an enemy unit in LTR, else C=0.
+;                  R2 is preserved.
+;          CITLTR: Return C=1 if there is an unowned city in LTR, and return
+;                  the direction in R2. Else C=0 and R2 is preserved.
+;
+
+swiltr: .blkw   1       ;0 if ENELTR, <>0 if CITLTR     
+
+CITLTR: mov     #-1,swiltr
+        br      com
+
+ENELTR: clr     swiltr
+
+com:    .savacs
+        movb    #8,R0           ;8 vals in LTR
+        mov     #LTR+8,R2
+        add     R5,R2           ;pointer to LTR
+2$:     movb    -(R2),R1        ;get val
+        tst     swiltr          ;CITLTR?
+        beq     7$              ;no
+        ifb     TYP(R1) eq #-2, 5$      ;if it's a city
+        br      1$              ;no
+
+7$:     tstb    TYP(R1)         ;is it a unit?
+        bmi     1$              ;no
+5$:     ifb     OWN(R1) eq PLYNUM(R5), 1$       ;if we own the unit or city
+        tst     swiltr          ;CITLTR?
+        beq     6$              ;no
+        dec     R0              ;convert to direction
+        mov     R0,8(SP)        ;this will be popped into R2
+6$:     sec                     ;we got one
+        br      3$
+
+1$:     sob     R0,2$
+        clc                     ;nothing of interest
+
+3$:     rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;
+;TCAF
+;Purpose:       If R1=T then R1=A and C=0
+;               If R1=C then R1=F and C=0
+;               else C=1
+;Use:
+;       mov     type,R1
+;       call    TCAF
+;
+
+TCAF:   clc
+        movb    TCtab(R1),R1
+        bpl     1$              ;C=0
+        com     R1              ;decode R1, C=1
+1$:     rts     PC
+
+TCtab:  .byte   ^C0,^C1,^C2,A,^C4,^C5,F,^C7
+        .even
+
+;;;;;;;;;;;;;;;;;;;;;;;
+; Type out values of strategy variables.
+
+LSTVAR:
+          .if   eq,debug        ;if debug program
+        .savacs
+        mov     PLYR(R5),R5
+        call    CLRSEC
+
+;first, TARGET array
+        .cmes   4,0,<TARGET >
+        call    SPACE
+        mov     #TARGET+CITMAX,R2
+        add     R5,R2           ;pointer to TARGET
+        mov     #CITMAX,R3      ;control count
+2$:     tstb    -(R2)           ;target?
+        beq     1$              ;no
+        asl     R3
+        mov     CITLOC-2(R3),R0
+        asr     R3
+        call    LOCPRT
+        call    SPACE
+1$:     sob     R3,2$
+
+;NUMUNI
+        .cmes   5,0,<NUMUNI >
+        call    TABBER
+        mov     #NUMUNI,R2
+        add     R5,R2
+        movb    #8,R3
+3$:     mov     (R2)+,R0
+        call    DECPRT
+        call    TABBER
+        sob     R3,3$
+
+;NUMPHS
+        .cmes   6,0,<NUMPHS >
+        call    TABBER
+        mov     #NUMPHS,R2
+        add     R5,R2
+        movb    #8,R3
+4$:     movb    (R2)+,R0
+        call    DECPRT
+        call    TABBER
+        sob     R3,4$
+
+;NUMOWN & NUMTAR
+        .cmes   7,0,<NUMOWN >
+        movb    NUMOWN(R5),R0
+        call    DECPRT
+        .imes   < NUMTAR >
+        movb    NUMTAR(R5),R0
+        call    DECPRT
+
+;TROOPT
+        .cmes   8,0,<TROOPT >,eolc
+        mov     #TROOPT,R4
+        add     R5,R4
+        mov     #6,R3
+loop1o: mov     #5,R2
+loop1i: mov     (R4)+,R0
+        call    LOCPRT
+        call    TABBER
+        sob     R2,loop1i
+        call    CRLF
+        sob     R3,loop1o
+
+;LOCI
+        .imes   <LOCI   >
+        mov     #LOCI,R4
+        add     R5,R4
+        mov     #LOCMAX,R3
+3$:     mov     #5,R2
+2$:     mov     (R4)+,R0
+        call    LOCPRT
+        call    TABBER
+        dec     R3
+        beq     4$
+        sob     R2,2$
+        call    CRLF
+        br      3$
+4$:
+          .endc
+        rts     PC
+
+        .end
+
+
+
+.

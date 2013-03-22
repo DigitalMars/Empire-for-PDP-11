@@ -1,0 +1,321 @@
+
+; SUB2.MAC      1-Dec-82
+;Purpose: Random Empire subroutines
+;Globals defined:
+        .globl  FNDCIT,SENSOR,CHKOWN,HITTAB,NEWUNI,TYPCIT
+
+        .globl  CITFND,TROOPT,NUMOWN,CLEAR,NUMTAR,NUMPHS,NUMUNI
+        .globl  INSECT,CENTER,FNDMAP,BELL,TTout
+        .globl  ROUND,MAPTAB,PLYR,FIPATH,PATLND,PATCNT
+        .globl  CITLOC,CITMAX,ARROW,MAP,CHAMAP,TTin,PHASE
+        .globl  TARGET,LOCI,LOCMAX,MAPPRT,MAPN,MAPNUM,OPT,PLYTYP,WATCH,PATHn
+        .globl  INMASK,OWN,PLYNUM,TYP,CITOWN,CITMAX,ROUND,CITPHS,CITLOC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Given a city location in R0, find the corresponding city
+; number in R3. Note that R0 must be in CITLOC or severe error...
+; Input:
+;       R0 =    location
+
+FNDCIT:
+          .if   eq,debug
+        call    CHKLOC
+          .endc
+        mov     #CITLOC,R3      ;start of CITLOC array
+1$:     cmp     R0,(R3)+        ;found it?
+          .if   ne,debug
+          .ift
+        bne     1$              ;loop till found
+          .iff
+        beq     2$              ;yes
+        if      R3 lo #CITLOC+<2*CITMAX>, 1$    ;if not done
+        .cmes   3,0,<FNDCIT>,eolc
+        call    MAP
+        .test   0
+        halt
+2$:
+          .endc
+        sub     #CITLOC+2,R3    ;index offset
+        asr     R3              ;from word index
+        rts     PC
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Do sensor probe about loc in R0. Update player maps, screen
+; and computer player variables. If enemy is detected, call
+; SENSOR for him also.
+; Input:
+;       R0 =    location
+;
+; Globals modified: MAPNUM,MAPS,TARGET,OPT,CITPHS,LOCI,TROOPT
+; Directions:   321
+;               4 0
+;               567
+
+switch: .blkb   1       ;Clear means we are on first time thru, else set.
+
+dirtab: .byte   3,2,1,4,-1,0,5,6,7      ;to minimize chars sent to screen
+        .even
+
+SENSOR:
+        clrb    switch          ;first time thru
+s2:                             ;second entry point
+        .savacs
+        mov     #9,R3           ;we will look at 9 locations
+stsens:
+          .if   eq,debug
+        tstb    AC0(SP)
+        bmi     50$
+        tstb    AC0+1(SP)
+        bpl     51$
+50$:    .cmes   4,0,<SENSOR>
+        halt
+51$:    
+          .endc
+        mov     AC0(SP),R0      ;get loc (from stack)
+        movb    dirtab-1(R3),R2 ;get direction from loc
+        bmi     1$              ;skip if loc isn't to change
+        call    ARROW           ;get new loc
+1$:     movb    MAPN(R5),MAPNUM ;set up map #
+        call    MAP             ;look at player map
+        push    R1              ;save result
+        clrb    MAPNUM          ;ref map
+        call    MAP             ;look at it
+
+;Here we check to see if it is an enemy piece or city. If so, do a sensor
+;probe about this loc for the enemy.
+        tstb    switch          ;if already doing an enemy map
+        bne     2$              ;yes, don't infinite loop
+        mov     PLYR(R5),R4     ;get pointer to enemy
+        ifb     OWN(R1) ne PLYNUM(R4), 2$       ;if not enemy owned
+        decb    switch          ;set switch
+        mov     R4,R5           ;switch players
+        call    s2              ;do sensor probe for enemy
+        mov     PLYR(R5),R5     ;back to our player
+        clrb    switch          ;reset switch
+
+2$:     movb    MAPN(R5),MAPNUM ;back to player map
+        ifb     R1 eq (SP)+, nochng     ;if ref map agrees with plyr map
+        call    CHAMAP          ;change player map to agree with ref map
+        tstb    watch(R5)       ;are we watching this player
+        beq     nochng          ;no
+        call    MAPPRT          ;print map value
+nochng: tstb    PLYTYP(R5)      ;computer player?
+        bne     dones2          ;no, we're done
+
+;Here we update variables for the computer strategy
+
+;If it's an unowned city, it will be placed in the TARGET array, if not
+;there already.
+        ifb     TYP(R1) ne #-2, notcit  ;if not a city
+        push    R3
+        call    FNDCIT          ;find out what city it is
+        mov     R3,R2           ;put city # in R2
+        pop     R3
+        ifb     CITOWN(R2) eq PLYNUM(R5), dones ;if we own it
+        add     R5,R2
+        movb    #-1,TARGET(R2)  ;set byte indicating a target
+dones2: br      dones           ;done
+
+;See if it's an enemy piece
+notcit: mov     PLYR(R5),R4             ;pointer to enemy variables
+        ifb     OWN(R1) ne PLYNUM(R4), dones    ;if not an enemy unit
+                                                ;(it's not a city)
+
+;Look for cities threatened by an enemy army...
+        movb    TYP(R1),R1      ;get type of unit
+        bne     notarm          ;not an army
+        call    THREAT          ;look for cities threatened by army
+        call    UPDLOC          ;update the LOCI array
+        br      dones           ;done
+
+;It's either an enemy fighter or ship. Ignore fighters. If ship, update TROOPT
+notarm: sub     #D,R1           ;if A or F, this will go negative
+        bcs     dones           ;if so, it's not a ship
+        call    UPDTRO          ;update TROOPT array
+
+;this is the end of the sensor main loop
+dones:  dec     R3              ;main loop counter
+        bne     stsens
+        rts     PC              ;ret and restore regs
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; If any nearby cities are threatened, reset their phases to -1
+; so CITYPH will set them to armies.
+; Input:
+;       R0 =    location
+; Output:
+;       R1,R2,R4 destroyed
+
+THREAT: mov     #CITMAX,R4      ;city index
+L901:   ifb     CITOWN-1(R4) ne PLYNUM(R5), 901$        ;if don't own city
+        tstb    CITPHS-1(R4)    ;is it producing armies?
+        beq     901$            ;yes
+        movb    CITPHS-1(R4),R2 ;get city phase
+        movb    PHASE(R2),R2    ;get amount of time to produce that phase
+        mov     R4,R1
+        asl     R1              ;word index
+        sub     CITFND-2(R1),R2 ;R2=PHASE-CITFND
+        mov     CITLOC-2(R1),R1 ;put city loc in R1
+        beq     901$            ;city doesn't exist
+        dec     R2              ;R2=PHASE-CITFND-1
+        add     ROUND(R5),R2    ;CITFND=ROUND+PHASE-1 ?
+        bne     901$            ;no
+        call    PATLND          ;path to threat?
+        bcs     901$            ;no
+          .if   eq,debug
+        .cmes   4,0,<THREAT >
+        .test   9
+          .endc
+        movb    #-1,CITPHS-1(R4)        ;select new phase
+901$:   sob     R4,L901         ;loop thru all cities
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Update LOCI array
+; Input:
+;       R0 =    location of enemy army
+; Output:
+;       R1,R2   destroyed
+
+UPDLOC: mov     #LOCI,R1
+        add     R5,R1           ;R1 -> LOCI
+        mov     #LOCMAX,R2      ;# of entries
+4$:     if      (R1)+ eq R0, 3$ ;if already in array
+        sob     R2,4$
+
+        tst     -(R1)           ;does last element exist?
+        beq     2$              ;no
+        mov     #LOCMAX-1,R2    ;control count
+1$:     tst     -(R1)           ;point to previous slot
+        mov     (R1),2(R1)      ;ripple down 1 spot
+        sob     R2,1$
+2$:     mov     R0,(R1)         ;store newest element
+3$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; An enemy ship has been discovered, put loc of it into TROOPT array.
+; Input:
+;       R0 =    loc of enemy ship
+;       R1 =    0..5 corresponding to DTSRCB
+; Output:
+;       R1,R2   destroyed
+
+UPDTRO: asl     R1
+        mov     R1,R2
+        asl     R1
+        add     R1,R2           ;R2=R1*6
+        asl     R2              ;words
+        add     #TROOPT,R2
+        add     R5,R2           ;get pointer into row of TROOPT
+        mov     #5,R1           ;five columns
+2$:     if      R0 eq (R2)+, 1$ ;if R0 is already in row
+        sob     R1,2$
+        sub     #2,R2           ;point to last column in row
+
+        mov     #4,R1           ;number of entries in that row -1
+3$:     mov     -(R2),2(R2)     ;shift right
+        sob     R1,3$
+        mov     R0,(R2)         ;store latest entry
+1$:     rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Create a new unit.
+; Input:
+;       R0 =    loc of new unit
+;       R1 =    unit type
+; Output:
+;       if successful then
+;               C = 0
+;               R2 = new unit #
+;               UNITOP = max(R2+1,UNITOP)
+;       else
+;               C = 1
+;               R2 destroyed
+
+NEWUNI: clr     R2              ;unit #
+1$:     tst     UNILOC(R2)      ;does unit already exist?
+        beq     2$              ;no
+        add     #2,R2           ;by words
+        if      R2 ne #UNIMAX*2, 1$     ;if not done
+        sec                     ;failed
+        rts     PC
+
+2$:     mov     R0,UNILOC(R2)   ;set unit location
+        clr     UNIILA(R2)      ;reset for player
+        asr     R2              ;byte
+        if      R2 lo UNITOP, 4$        ;UNITOP must be > max unit #
+        mov     R2,UNITOP       ;set new max
+        inc     UNITOP          ;to 1 past max unit #
+4$:     movb    R1,UNIT2(R2)    ;set type
+        movb    HITTAB(R1),UNIT1(R2)    ;set hits/fuel
+        ifb     PLYNUM(R5) eq #1, 3$    ;if player 1
+        bisb    #^B01000000,UNIT1(R2)   ;indicate plyr 2
+3$:     clc                     ;succeeded
+        rts     PC
+
+;Table of initial values for UNIT1. Note that value for F is fuel.
+;Note that value for A must be 0 for comp. strategy.
+;               A  F D T S R C  B
+HITTAB: .byte   0,20,3,3,2,8,8,12
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; CHKOWN
+; Purpose: See if we own a particular unit.
+; Use:
+;       mov     num,R3          ;unit number
+;       call    CHKOWN
+;
+; Return: C=0 if own, else C=1
+
+CHKOWN: asl     R3              ;word
+        tst     UNILOC(R3)      ;does unit exist?
+        bne     exist           ;yes
+        asr     R3              ;restore R3
+notown: sec                     ;don't own it
+        rts     PC
+
+exist:  asr     R3              ;byte
+        bitb    #^B01000000,UNIT1(R3)   ;see if unit is plyr 2
+        bne     p2              ;yes
+        ifb     PLYNUM(R5) eq #1, ownit ;if plyr 1
+        br      notown
+
+p2:     ifb     PLYNUM(R5) ne #2, notown        ;if not plyr 2
+ownit:  clc                     ;we own it
+        rts     PC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Type out data on a city.
+; Input:
+;       R3 =    city #
+
+TYPCIT: push    R0
+        movb    CITPHS(R3),R0
+        bmi     1$              ;not a valid phase
+        .cmes   1,20,<Producing: >
+        tstb    R0              ;is it an army?
+        beq     2$              ;yes
+        inc     R0              ;because of 2 Fs
+2$:     movb    MAPTAB+6(R0),R0 ;get displayable chr
+        call    TTout           ;type it
+        .imes   < Completion: >,eol
+        asl     R3
+        mov     CITFND(R3),R0
+        call    DECPRT          ;type completion date
+        mov     R3,R0           ;save index
+        asr     R3              ;restore R3
+        tstb    PLYTYP(R5)      ;human?
+        beq     1$              ;no
+        add     R5,R0
+        mov     FIPATH(R0),R0   ;get fipath for city
+        beq     1$              ;no fipath
+        .imes   < Fipath: >
+        call    LOCPRT
+1$:     pop     R0
+        rts     PC
+
+        .END
+
+
+.

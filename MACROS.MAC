@@ -1,0 +1,124 @@
+
+; MACROS.MAC    21-Jul-83
+        .nlist
+        .list   meb
+        .nlist  com
+        .nlist  cnd
+        .globl  CURMES,INLMES,TTcurs,TEST,DECPRT,LOCPRT,LOCDOT,SAVACS,CRLF
+        .globl  TTfunc,UNIMAX,UNITOP,UNILOC,UNIILA,UNIT1,UNIT2
+        .globl  PLYTYP,CHKMAP,CHKDIR,CHKLOC,SPACE,PLYR
+        .radix  10
+        .enabl  lc
+        eolc=   ^O200
+        eol=    ^O201
+        eold=   ^O202
+        debug=  1               ;0 means debug
+        EIS=    1               ;0 means assemble for EIS
+        VERSIO= 4               ;version #
+
+        CR      = 13
+        LF      = 10
+        TAB     = 9
+        ESC     = 27
+        FF      = 12
+        SPC     = 32
+        BS      = 8
+        BEL     = 7
+        DEL     = ^O177
+
+.macro  push    A
+.if b   <A>
+        clr     -(SP)
+.iff
+.irp    B,<A>
+          MOV   B,-(6)
+.endm
+.endc
+.endm
+
+.macro  pop     A
+.if b   <A>
+          TST   (6)+
+.iff
+.irp    B,<A>
+        mov     (6)+,B
+.endm
+.endc
+.endm
+
+.macro  call    S
+        jsr     7,S
+.endm
+.macro  .imes   text,term
+        jsr     R1,INLMES
+        .ascii  /'text/
+.if     b,term
+        .byte   0
+.iff
+        .byte   term
+.endc
+        .even
+.endm
+.macro  .cmes   row,col,text,term
+        jsr     R1,CURMES
+        .byte   row,col
+        .ascii  /'text/
+.if     b,term
+        .byte   0
+.iff
+        .byte   term
+.endc
+        .even
+.endm
+.macro  .curs   .r,.c
+        jsr     R1,TTcurs
+        .byte   .r,.c
+.endm
+.macro  .TTfunc n
+        jsr     R1,TTfunc
+        .word   n
+.endm
+.macro  .test   n
+        jsr     R5,TEST
+        .word   n
+.endm
+.macro  .savacs
+        jsr     R0,SAVACS
+.endm
+        AC0=12
+        AC1=10
+        AC2=8
+        AC3=6
+        AC4=4
+        AC5=2
+.macro  if      .A,cond,.B,lbl
+        cmp     .A,.B
+        b'cond  lbl
+.endm
+.macro  ifb     .A,cond,.B,lbl
+        cmpb    .A,.B
+        b'cond  lbl
+.endm
+        J =     -1      ;land, sea, or space
+        X =     -2      ;city
+        A=      0
+        F=      1
+        D=      2
+        T=      3
+        S=      4
+        R=      5
+        C=      6
+        B=      7
+
+;Terminal display size
+        Trowmx= 23      ;rows are 0..23
+        Tcolmx= 79      ;cols are 0..79
+
+;Map size
+        Mrowmx= 59      ;rows are 0..59
+        Mcolmx= 99      ;cols are 0..99
+
+        .list
+
+
+.
